@@ -8,7 +8,7 @@
 
 ## Ownership
 
-The `antigravity` plugin contributes the `antigravity` model backend through DotCraft's model backend extension point and a Desktop module that owns the Composer subscription indicator. The official local Antigravity CLI (`agy`) owns model transport, Google/Enterprise authentication and credential storage. DotCraft owns instructions, conversation state, tool declarations, approval and execution.
+The `antigravity` plugin contributes the `antigravity` model backend through DotCraft's model backend extension point and a Desktop module that surfaces limit and verification notices above the Composer. The official local Antigravity CLI (`agy`) owns model transport, Google/Enterprise authentication and credential storage. DotCraft owns instructions, conversation state, tool declarations, approval and execution.
 
 The plugin never embeds OAuth client credentials, never reads or parses stored OAuth token files or OS keyring secrets, and never calls undocumented Google Cloud Code Assist endpoints directly.
 
@@ -29,7 +29,7 @@ Each conversation run uses a private directory under the plugin's data root (`Pr
 3. Because `agy --input-format stream-json` accepts only `text` blocks on `stdin`, image/audio/video `DataContent` attachments are materialized into the run's private media folder, granted exact `read_file(<path>)` and `view_file(<path>)` rules in the isolated `settings.json` (respawning with `--conversation <id>` if an existing live worker predated the rule), and referenced in the user message as `[Image](<path>)`.
 4. Stream events (`init`, `step_update`, `result`) project to provider-neutral `ChatResponseUpdate` items. Cumulative session usage reported by persistent `agy` workers is converted to per-turn deltas against the worker baseline.
 5. When the model calls one or more DotCraft tools through the loopback MCP server, the server mints unique call IDs, holds the HTTP `tools/call` requests open on pending completions, and coalesces concurrent calls arriving within a short batch window into one `ChatFinishReason.ToolCalls` boundary. DotCraft approves and executes the tools; the next sampling request supplies matching `FunctionResultContent` entries, completing the pending MCP calls so the same live `agy` process continues without restarting.
-6. Fail-closed guard: any `step_update` with `step_type == "tool"` targeting a tool outside the bridged `dotcraft` MCP catalog and authorized media-read paths immediately terminates the child process and fails the turn with `Antigravity.NativeToolBlocked`.
+6. Fail-closed guard: any `step_update` with `step_type == "tool"` targeting a tool outside the bridged `dotcraft` MCP catalog (including `call_mcp_tool` invocations whose `ServerName` is `dotcraft` and `ToolName` is declared) and authorized media-read paths immediately terminates the child process and fails the turn with `Antigravity.NativeToolBlocked`.
 
 Retained runs are scoped to provider, backend generation, thread, context window and request kind. Continuation requires matching instructions, model, effort, tools, `allowAiCredits` and history prefix. Any changed request or history starts a fresh run from the complete DotCraft conversation. Compaction and non-turn requests end their run at the final result, and requests without conversation identity use isolated runs.
 
@@ -54,7 +54,7 @@ Idle conversation runs remain live for `idleTimeoutSeconds` (default 900 seconds
 
 ## Desktop module
 
-The Desktop module wraps `composer.status.subscription` and adds `composer.before` exclusively for providers with `backendId === "antigravity"`. It displays shared quota pools, reset countdowns, plan label, AI credits balance and limit/verification banners using `provider/auth/usage`.
+The Desktop module adds `composer.before` exclusively for providers with `backendId === "antigravity"` to show quota-reached, AI-credits-exhausted and Google account verification banners using `provider/auth/usage`, while delegating the Composer usage pill, hover tooltip and detail popover to DotCraft's built-in provider usage UI.
 
 ## Run lifetime
 

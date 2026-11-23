@@ -265,6 +265,19 @@ public sealed class BackendSamplingTests
         Assert.False(BackendFixture.IsAlive(Assert.Single(fixture.ChatPids)));
     }
 
+    [Fact]
+    public async Task CallMcpToolTargetingForeignServerFailsClosed()
+    {
+        await using var fixture = new BackendFixture();
+
+        var ex = await Assert.ThrowsAsync<NativeToolBlockedException>(() =>
+            fixture.Client.GetResponseAsync([new(ChatRole.User, "foreign-mcp")], Options()).WaitAsync(TimeSpan.FromSeconds(15)));
+
+        Assert.Contains("Antigravity.NativeToolBlocked", ex.Message);
+        Assert.Contains("call_mcp_tool", ex.Message);
+        Assert.False(BackendFixture.IsAlive(Assert.Single(fixture.ChatPids)));
+    }
+
     [Theory]
     [InlineData("gemini-4-neon", "ExtraHigh", true, "gemini-4-neon-xhigh", "xhigh")]
     [InlineData("gemini-4-neon", "High", false, "gemini-4-neon-low", "low")]

@@ -1,9 +1,7 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import type { ComponentType, ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { activate } from './index'
-
-vi.mock('@dotcraft/plugin', () => ({ ActionTooltip: ({ children }: { children: ReactNode }) => children }))
 
 type Surface = ComponentType<{ context: Record<string, unknown>; children?: ReactNode }>
 
@@ -30,6 +28,7 @@ function setup(usage: Record<string, unknown>) {
   void activate(host as never)
   return {
     request,
+    hasSurface: (name: string) => surfaces.has(name),
     surface: (name: string) => surfaces.get(name)!,
     notify: (method: string) => notifications.get(method)?.(),
     update: (next: Record<string, unknown>) => { current = next }
@@ -41,35 +40,14 @@ const context = (backendId: string | null) => ({ minimalChrome: false, provider:
 describe('Antigravity desktop module', () => {
   afterEach(cleanup)
 
-  it('replaces the usage indicator only for the antigravity backend and renders multi-pool popover', async () => {
-    const plugin = setup({
-      available: true,
-      planType: 'Google AI Pro',
-      credits: { hasCredits: true, unlimited: false, balance: '420' },
-      values: {
-        'pool.gemini4.remaining': 80,
-        'pool.claude.remaining': 35
-      },
-      labels: {
-        pool_order: 'gemini4,claude',
-        'pool.gemini4.name': 'Gemini 4',
-        'pool.claude.name': 'Claude'
-      }
-    })
-    const Usage = plugin.surface('composer.status.subscription')
+  it('leaves composer.status.subscription to DotCraft and only activates limit notices for antigravity', () => {
+    const plugin = setup({ available: true })
+    expect(plugin.hasSurface('composer.status.subscription')).toBe(false)
 
-    render(<Usage context={context('other')}><span data-testid="core-usage" /></Usage>)
-    expect(screen.getByTestId('core-usage')).toBeTruthy()
+    const Notice = plugin.surface('composer.before')
+    render(<Notice context={context('other')} />)
+    expect(screen.queryByRole('status')).toBeNull()
     expect(plugin.request).not.toHaveBeenCalled()
-    cleanup()
-
-    render(<Usage context={context('antigravity')}><span data-testid="core-usage" /></Usage>)
-    expect(screen.queryByTestId('core-usage')).toBeNull()
-    await waitFor(() => expect(plugin.request).toHaveBeenCalledWith('provider/auth/usage', { providerId: 'ag' }, 30_000))
-    const button = await screen.findByRole('button', { name: /Gemini 4 80% left.*Claude 35% left/ })
-    fireEvent.click(button)
-    expect(await screen.findByText('Google AI Pro')).toBeTruthy()
-    expect(screen.getByText('AI credits: 420')).toBeTruthy()
   })
 
   it('refreshes after a turn and renders a verification link when validation is required', async () => {
@@ -78,10 +56,9 @@ describe('Antigravity desktop module', () => {
       values: { 'pool.gemini4.remaining': 90 },
       labels: { pool_order: 'gemini4', 'pool.gemini4.name': 'Gemini 4' }
     })
-    const Usage = plugin.surface('composer.status.subscription')
     const Notice = plugin.surface('composer.before')
-    render(<><Notice context={context('antigravity')} /><Usage context={context('antigravity')} /></>)
-    expect(await screen.findByRole('button', { name: /90% left/ })).toBeTruthy()
+    render(<Notice context={context('antigravity')} />)
+    await waitFor(() => expect(plugin.request).toHaveBeenCalledWith('provider/auth/usage', { providerId: 'ag' }, 30_000))
     expect(screen.queryByRole('status')).toBeNull()
 
     plugin.update({

@@ -129,7 +129,7 @@ internal sealed partial class AntigravityAccount(
                     return new(
                         IsAuthenticated: true,
                         AccountId: "agy-cli",
-                        DisplayName: "Antigravity CLI");
+                        DisplayName: "Google Antigravity");
                 }
             }
 

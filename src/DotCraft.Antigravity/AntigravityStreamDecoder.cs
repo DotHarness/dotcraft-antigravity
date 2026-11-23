@@ -176,12 +176,39 @@ internal sealed class AntigravityStreamDecoder(
         if (tools.IsBridgedStreamToolName(toolName))
             return;
 
+        if (string.Equals(toolName, "call_mcp_tool", StringComparison.OrdinalIgnoreCase) && IsBridgedMcpCall(step))
+            return;
+
         if (!string.IsNullOrWhiteSpace(toolName) && MediaTools.Contains(toolName) && IsAuthorizedMediaRead(step))
             return;
 
         throw new NativeToolBlockedException(
             $"Antigravity.NativeToolBlocked: Antigravity CLI attempted built-in tool '{toolName ?? "unknown"}' outside DotCraft's tool catalog.");
     }
+
+    private bool IsBridgedMcpCall(JsonElement step)
+    {
+        if (!step.TryGetProperty("tool_info", out var info) || info.ValueKind != JsonValueKind.Object)
+            return false;
+        if (!info.TryGetProperty("parameters", out var parameters) || parameters.ValueKind != JsonValueKind.Object)
+            return false;
+
+        var serverName = ReadString(parameters, "ServerName")
+            ?? ReadString(parameters, "serverName")
+            ?? ReadString(parameters, "server_name");
+        if (!string.Equals(serverName, AntigravityTools.ServerName, StringComparison.Ordinal))
+            return false;
+
+        var targetTool = ReadString(parameters, "ToolName")
+            ?? ReadString(parameters, "toolName")
+            ?? ReadString(parameters, "tool_name");
+        return tools.IsBridgedStreamToolName(targetTool);
+    }
+
+    private static string? ReadString(JsonElement obj, string name) =>
+        obj.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.String
+            ? prop.GetString()?.Trim()
+            : null;
 
     private bool IsAuthorizedMediaRead(JsonElement step)
     {

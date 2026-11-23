@@ -36,7 +36,7 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
         "Antigravity",
         "antigravity",
         new[] { "antigravity" },
-        new[] { new ProviderAuthenticationMethod("cli", "Antigravity CLI account", "cli") },
+        new[] { new ProviderAuthenticationMethod("cli", "Antigravity account", "cli") },
         new ModelProviderCapabilities
         {
             CachedInputUsageReporting = true,

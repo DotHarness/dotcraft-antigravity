@@ -318,6 +318,28 @@ while (true)
         return 0;
     }
 
+    if (text.Contains("foreign-mcp", StringComparison.Ordinal))
+    {
+        Emit(new
+        {
+            @event = "step_update",
+            step_update = new
+            {
+                conversation_id = conversationId,
+                step_index = 1,
+                state = "ACTIVE",
+                step_type = "tool",
+                tool_name = "call_mcp_tool",
+                tool_info = new
+                {
+                    name = "call_mcp_tool",
+                    parameters = new { ServerName = "other", ToolName = "secret" }
+                }
+            }
+        });
+        return 0;
+    }
+
     if (Regex.IsMatch(text, @"\bhang\b"))
     {
         Emit(new
@@ -384,8 +406,12 @@ while (true)
                 step_index = 2,
                 state = "DONE",
                 step_type = "tool",
-                tool_name = "mcp__dotcraft__" + listed[0].Name,
-                tool_info = new { name = listed[0].Name }
+                tool_name = "call_mcp_tool",
+                tool_info = new
+                {
+                    name = "call_mcp_tool",
+                    parameters = new { ServerName = "dotcraft", ToolName = listed[0].Name }
+                }
             }
         });
 

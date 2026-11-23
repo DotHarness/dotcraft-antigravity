@@ -1,22 +1,12 @@
 import type { DesktopPluginComposerSurfaceContext, DesktopPluginHost } from '@dotcraft/plugin'
 
-export const BACKEND_ID = 'antigravity'
+const BACKEND_ID = 'antigravity'
 const REFRESH_INTERVAL_MS = 10 * 60_000
 
-export interface QuotaPool {
-  readonly key: string
-  readonly name: string
-  readonly remainingPercent: number
-  readonly resetAtMs: number | null
-}
-
 export interface AntigravityUsage {
-  readonly planType: string | null
-  readonly pools: readonly QuotaPool[]
-  readonly creditsBalance: string | null
+  readonly soonestResetAtMs: number | null
   readonly limitReachedKind: string | null
   readonly validationUrl: string | null
-  readonly fetchedAt: string | null
 }
 
 export function antigravityProviderId({ provider }: DesktopPluginComposerSurfaceContext): string | null {
@@ -30,16 +20,13 @@ export interface UsageFeed {
 
 interface RawUsageResult {
   available?: boolean
-  planType?: string | null
-  fetchedAt?: string | null
   limitReachedKind?: string | null
-  primary?: { usedPercent: number; resetAt: string } | null
-  credits?: { hasCredits: boolean; unlimited: boolean; balance?: string | null } | null
+  primary?: { resetAt: string } | null
   values?: Record<string, number> | null
   labels?: Record<string, string> | null
 }
 
-export function parseUsageResult(result: RawUsageResult): AntigravityUsage | null {
+function parseUsageResult(result: RawUsageResult): AntigravityUsage | null {
   if (!result.available) return null
   const values = result.values ?? {}
   const labels = result.labels ?? {}
@@ -48,27 +35,15 @@ export function parseUsageResult(result: RawUsageResult): AntigravityUsage | nul
     .map((item) => item.trim())
     .filter(Boolean)
 
-  const pools: QuotaPool[] = []
+  const resetTimes: number[] = []
   for (const key of order) {
-    const remaining = values[`pool.${key}.remaining`]
-    if (typeof remaining !== 'number' || !Number.isFinite(remaining)) continue
     const resetEpoch = values[`pool.${key}.reset_epoch_ms`]
-    pools.push({
-      key,
-      name: labels[`pool.${key}.name`] || key,
-      remainingPercent: Math.max(0, Math.min(100, Math.round(remaining))),
-      resetAtMs: typeof resetEpoch === 'number' && Number.isFinite(resetEpoch) ? resetEpoch : null
-    })
+    if (typeof resetEpoch === 'number' && Number.isFinite(resetEpoch)) resetTimes.push(resetEpoch)
   }
 
-  if (pools.length === 0 && result.primary) {
+  if (resetTimes.length === 0 && result.primary) {
     const resetMs = Date.parse(result.primary.resetAt)
-    pools.push({
-      key: 'primary',
-      name: 'Quota',
-      remainingPercent: Math.max(0, Math.min(100, 100 - Math.round(result.primary.usedPercent))),
-      resetAtMs: Number.isFinite(resetMs) ? resetMs : null
-    })
+    if (Number.isFinite(resetMs)) resetTimes.push(resetMs)
   }
 
   const validationUrl = typeof labels.validation_url === 'string' && labels.validation_url.startsWith('https://accounts.google.com/')
@@ -76,12 +51,9 @@ export function parseUsageResult(result: RawUsageResult): AntigravityUsage | nul
     : null
 
   return {
-    planType: result.planType ?? null,
-    pools,
-    creditsBalance: result.credits?.balance ?? null,
+    soonestResetAtMs: resetTimes.length > 0 ? Math.min(...resetTimes) : null,
     limitReachedKind: result.limitReachedKind ?? null,
-    validationUrl,
-    fetchedAt: result.fetchedAt ?? null
+    validationUrl
   }
 }
 
