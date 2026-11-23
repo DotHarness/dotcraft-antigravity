@@ -41,15 +41,15 @@ Idle conversation runs remain live for `idleTimeoutSeconds` (default 900 seconds
 
 - One `cli` authentication method (`Antigravity CLI account`) delegates credentials to `agy`.
 - Executable lookup honors `executablePath`, `ANTIGRAVITY_COMMAND` / `AGY_CLI_PATH` / `ANTIGRAVITY_CLI_PATH` and `PATH` before probing standard per-OS install locations, including `%LOCALAPPDATA%\agy\bin\agy.exe` on Windows.
-- `GetStatusAsync` verifies CLI presence (`Antigravity.CliNotFound`) and probes authentication via `agy models` (`Antigravity.LoginRequired` when unauthenticated), without ever reading credential contents.
-- `LoginAsync` completes immediately when the CLI is already signed in; otherwise it launches `agy acp --login` with `BROWSER=dotcraft-no-browser`, emits the printed sign-in link as an `auth_url` event, and writes each `manual_code` answer to `stdin` until sign-in completes.
-- `LogoutAsync` stops retained runs, clears cached catalog/usage/limit state, and invokes `agy -p "/logout" --output-format json`.
+- `GetStatusAsync` verifies CLI presence (`Antigravity.CliNotFound`) and probes authentication via `agy models` (`Antigravity.LoginRequired` when unauthenticated), without ever reading credential contents. Authenticated status is cached with single-flight execution for 60 seconds and invalidated on login, logout or unauthorized sampling failures.
+- `LoginAsync` probes fresh CLI status and completes immediately when already signed in. Otherwise, it launches `agy acp --login` with `BROWSER=dotcraft-no-browser`, extracts the sign-in link from either `stdout` or `stderr` as an `auth_url` event, and races `manual_code` prompts against CLI exit so both copy-paste codes and browser localhost callbacks complete cleanly.
+- `LogoutAsync` stops retained runs, clears cached auth/catalog/usage/limit state, and invokes `agy -p "/logout" --output-format json`.
 - Model discovery parses `agy models`, grouping effort-suffixed slugs (`-low`, `-medium`, `-high`, `-xhigh`, `-max`) into one public model entry with `ModelReasoningSupport` while preserving exact CLI slugs per effort. `IProviderModelRuntimeResolver` projects model metadata, vision capability and safe context window bounds (`239_000` default below `agy`'s internal auto-checkpoint limit, `200_000` for Claude, `128_000` for GPT-OSS).
 
 ## Quota, early failure detection and usage
 
-- Usage queries run `agy -p "/usage" --output-format json` in an isolated workspace with single-flight execution and a 60-second cache, consuming zero inference tokens.
-- Returned quota groups and buckets map to `ProviderUsageSnapshot` (`Primary` for the tightest pool, `Values["pool.<key>.remaining"]`, `Values["pool.<key>.reset_epoch_ms"]`, `Labels["pool.<key>.name"]`, `Labels["pool_order"]`, plus optional `PlanType` and `Credits`).
+- Usage queries run `agy -p "/usage" --output-format json` in an isolated workspace with `disableSlashCommands: false`, single-flight execution and a 60-second cache, consuming zero inference tokens.
+- Returned quota groups and buckets map to `ProviderUsageSnapshot` (`Primary` for the tightest 5-hour pool and `Secondary` for the tightest weekly pool when both exist, falling back to `Primary` for the tightest pool overall, along with `Values["pool.<key>.remaining"]`, `Values["pool.<key>.reset_epoch_ms"]`, `Labels["pool.<key>.name"]`, `Labels["pool_order"]`, and optional `PlanType` and `Credits`).
 - Error messages from `result.error`, `stderr` and an isolated `cli-*.log` early-quota watchdog classify `RESOURCE_EXHAUSTED` / `Individual quota reached` (`quota_reached`), `AI credits balance is too low` (`credits_exhausted`) and `VALIDATION_REQUIRED` (`validation_required` with extracted `https://accounts.google.com/...` verification link), updating account limit state to avoid retry loops and surfacing banners in Desktop.
 
 ## Desktop module

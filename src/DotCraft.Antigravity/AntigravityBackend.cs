@@ -19,6 +19,7 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
     private readonly TimeProvider _clock;
     private readonly TimeSpan _toolBatchWindow;
     private readonly AntigravityModels _models = new();
+    private readonly AntigravityAuthStatusCache _authCache = new();
     private readonly AntigravityLimits _limits;
     private readonly AntigravityUsage _usage;
     private readonly CancellationTokenSource _stopping;
@@ -187,6 +188,11 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
                     try
                     {
                         hasMore = await reader.WaitToReadAsync(token);
+                    }
+                    catch (ProviderFailureException ex) when (ex.Failure.Kind == ProviderFailureKind.Unauthorized)
+                    {
+                        _authCache.Clear();
+                        throw;
                     }
                     catch (Exception ex) when (
                         resumedFromShelf
@@ -443,7 +449,8 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
             stopping,
             backend.StopRunsAsync,
             backend._clock,
-            backend._configDirectory);
+            backend._configDirectory,
+            backend._authCache);
 
         public IReadOnlyCollection<string> Protocols => new[] { "antigravity" };
 

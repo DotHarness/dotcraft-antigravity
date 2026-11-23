@@ -101,7 +101,8 @@ internal static partial class AntigravityEnvironment
         bool allowAiCredits,
         IEnumerable<string>? allowedMediaPaths,
         CancellationToken ct,
-        string? explicitConfigDir = null)
+        string? explicitConfigDir = null,
+        bool disableSlashCommands = true)
     {
         var isolatedHome = directory.EnsureSubdirectory("home");
         var isolatedGeminiDir = directory.EnsureSubdirectory("home", ".gemini", "antigravity-cli");
@@ -109,7 +110,7 @@ internal static partial class AntigravityEnvironment
         SyncIsolatedToken(isolatedHome, explicitConfigDir);
         LinkMacOsKeychains(isolatedHome, explicitConfigDir);
 
-        await WriteSettingsAsync(directory, allowAiCredits, allowedMediaPaths, ct);
+        await WriteSettingsAsync(directory, allowAiCredits, allowedMediaPaths, ct, disableSlashCommands);
         return (isolatedHome, isolatedGeminiDir);
     }
 
@@ -117,7 +118,8 @@ internal static partial class AntigravityEnvironment
         PrivateDirectory directory,
         bool allowAiCredits,
         IEnumerable<string>? allowedMediaPaths,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool disableSlashCommands = true)
     {
         var allow = new JsonArray { "mcp(dotcraft/*)" };
         if (allowedMediaPaths is not null)
@@ -136,7 +138,7 @@ internal static partial class AntigravityEnvironment
             ["agentMode"] = "",
             ["toolPermission"] = "request-review",
             ["enableTerminalSandbox"] = false,
-            ["disableSlashCommands"] = true,
+            ["disableSlashCommands"] = disableSlashCommands,
             ["useG1Credits"] = allowAiCredits,
             ["permissions"] = new JsonObject
             {

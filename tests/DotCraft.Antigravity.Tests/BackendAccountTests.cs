@@ -112,6 +112,38 @@ public sealed class BackendAccountTests
     }
 
     [Fact]
+    public async Task SignInCompletesWhenAcpLoginFinishesViaBrowserCallback()
+    {
+        await using var fixture = new BackendFixture();
+        await File.WriteAllTextAsync(Path.Combine(fixture.Root, "fake-account.json"), "{\"authenticated\":false}");
+        await File.WriteAllTextAsync(Path.Combine(fixture.Root, "fake-login-callback"), "1");
+        var auth = Assert.IsAssignableFrom<IProviderAuthenticator>(fixture.Provider);
+        var interaction = new HangingInteraction();
+
+        var status = await auth.LoginAsync("cli", interaction, default);
+
+        Assert.True(status.IsAuthenticated);
+        Assert.Equal("https://accounts.google.com/o/oauth2/auth?client=agy&mode=callback", Assert.Single(interaction.Events, e => e.Kind == "auth_url").Url);
+    }
+
+    [Fact]
+    public async Task AuthenticatedStatusIsCachedAcrossProbesUntilLogout()
+    {
+        await using var fixture = new BackendFixture();
+        var auth = Assert.IsAssignableFrom<IProviderAuthenticator>(fixture.Provider);
+
+        var first = await auth.GetStatusAsync(default);
+        var second = await auth.GetStatusAsync(default);
+
+        Assert.True(first.IsAuthenticated);
+        Assert.True(second.IsAuthenticated);
+        Assert.Single(fixture.Files("started-*.json"));
+
+        await auth.LogoutAsync(default);
+        Assert.False((await auth.GetStatusAsync(default)).IsAuthenticated);
+    }
+
+    [Fact]
     public async Task UsageParsesQuotaPoolsPlanAndCreditsFromCliJson()
     {
         await using var fixture = new BackendFixture();
@@ -122,12 +154,15 @@ public sealed class BackendAccountTests
         Assert.NotNull(snapshot);
         Assert.Equal("Google AI Pro", snapshot!.PlanType);
         Assert.Equal("420", snapshot.Credits!.Balance);
-        Assert.Equal("gemini_5h,claude_5h", snapshot.Labels!["pool_order"]);
+        Assert.Equal("gemini_5h,gemini_weekly,claude_5h,claude_weekly", snapshot.Labels!["pool_order"]);
         Assert.Equal(80.0, snapshot.Values["pool.gemini_5h.remaining"]);
         Assert.Equal(35.0, snapshot.Values["pool.claude_5h.remaining"]);
         Assert.Equal("Gemini (5h)", snapshot.Labels["pool.gemini_5h.name"]);
         Assert.Equal("Claude / GPT (5h)", snapshot.Labels["pool.claude_5h.name"]);
         Assert.Equal(65, snapshot.Primary!.UsedPercent);
+        Assert.Equal(TimeSpan.FromHours(5), snapshot.Primary.WindowDuration);
+        Assert.Equal(58, snapshot.Secondary!.UsedPercent);
+        Assert.Equal(TimeSpan.FromDays(7), snapshot.Secondary.WindowDuration);
     }
 
     [Fact]
@@ -175,6 +210,23 @@ public sealed class BackendAccountTests
         {
             Prompts.Add(prompt);
             return Task.FromResult(_answers.Dequeue());
+        }
+    }
+
+    private sealed class HangingInteraction : IProviderLoginInteraction
+    {
+        public List<ProviderLoginEvent> Events { get; } = [];
+
+        public ValueTask NotifyAsync(ProviderLoginEvent notification, CancellationToken cancellationToken)
+        {
+            Events.Add(notification);
+            return ValueTask.CompletedTask;
+        }
+
+        public async Task<string> PromptAsync(ProviderLoginPrompt prompt, CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return string.Empty;
         }
     }
 

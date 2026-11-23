@@ -59,6 +59,17 @@ if (args.Length >= 2 && args[0] == "acp" && args.Contains("--login"))
     await File.WriteAllTextAsync(
         Path.Combine(root, $"login-{pid}.json"),
         JsonSerializer.Serialize(new { browser = Environment.GetEnvironmentVariable("BROWSER") }));
+    var callbackMode = File.Exists(Path.Combine(root, "fake-login-callback"));
+    if (callbackMode)
+    {
+        await Console.Error.WriteLineAsync("Visit: https://accounts.google.com/o/oauth2/auth?client=agy&mode=callback");
+        await Console.Error.FlushAsync();
+        await Task.Delay(150);
+        await File.WriteAllTextAsync(accountPath, "{\"authenticated\":true}");
+        Console.WriteLine("Sign-in complete.");
+        return 0;
+    }
+
     Console.WriteLine("Opening browser to sign in...");
     Console.WriteLine("If the browser did not open, visit: https://accounts.google.com/o/oauth2/auth?client=agy");
     Console.Out.Flush();
@@ -93,6 +104,18 @@ if (args.Contains("-p"))
             await Console.Error.WriteLineAsync("authentication required");
             return 1;
         }
+        var usageHome = Environment.GetEnvironmentVariable("HOME") ?? "";
+        var usageSettingsPath = Path.Combine(usageHome, ".gemini", "antigravity-cli", "settings.json");
+        if (File.Exists(usageSettingsPath))
+        {
+            using var settingsDoc = JsonDocument.Parse(await File.ReadAllTextAsync(usageSettingsPath));
+            if (settingsDoc.RootElement.TryGetProperty("disableSlashCommands", out var disableProp)
+                && disableProp.ValueKind == JsonValueKind.True)
+            {
+                Console.WriteLine("{\"status\":\"SUCCESS\",\"response\":\"\",\"num_turns\":1,\"usage\":{\"total_tokens\":4738}}");
+                return 0;
+            }
+        }
         var usagePath = Path.Combine(root, "fake-usage.json");
         if (File.Exists(usagePath))
         {
@@ -110,13 +133,15 @@ if (args.Contains("-p"))
                     {
                       "name": "Gemini Models",
                       "buckets": [
-                        { "id": "gemini-5h", "window": "5h", "remaining_fraction": 0.8, "reset_time": "2099-01-01T05:00:00Z" }
+                        { "id": "gemini-5h", "window": "5h", "remaining_fraction": 0.8, "reset_time": "2099-01-01T05:00:00Z" },
+                        { "id": "gemini-weekly", "window": "weekly", "remaining_fraction": 0.5, "reset_time": "2099-01-08T00:00:00Z" }
                       ]
                     },
                     {
                       "name": "Claude and GPT models",
                       "buckets": [
-                        { "id": "claude-5h", "window": "5h", "remaining_fraction": 0.35, "reset_time": "2099-01-01T06:00:00Z" }
+                        { "id": "claude-5h", "window": "5h", "remaining_fraction": 0.35, "reset_time": "2099-01-01T06:00:00Z" },
+                        { "id": "claude-weekly", "window": "weekly", "remaining_fraction": 0.42, "reset_time": "2099-01-08T02:00:00Z" }
                       ]
                     }
                   ]

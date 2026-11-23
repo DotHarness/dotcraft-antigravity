@@ -11,6 +11,7 @@ internal sealed class AntigravityProcess : IAsyncDisposable
 
     private readonly Process _process;
     private readonly Task _stderrTask;
+    private readonly Action<string>? _onStderrLine;
     private readonly object _stderrLock = new();
     private readonly StringBuilder _stderr = new();
     private int _disposed;
@@ -23,8 +24,10 @@ internal sealed class AntigravityProcess : IAsyncDisposable
         string executablePath,
         string workingDirectory,
         IEnumerable<string> arguments,
-        IReadOnlyDictionary<string, string>? environment = null)
+        IReadOnlyDictionary<string, string>? environment = null,
+        Action<string>? onStderrLine = null)
     {
+        _onStderrLine = onStderrLine;
         var start = new ProcessStartInfo(executablePath)
         {
             UseShellExecute = false,
@@ -117,6 +120,7 @@ internal sealed class AntigravityProcess : IAsyncDisposable
     private async Task DrainStderrAsync()
     {
         var buffer = new char[1024];
+        var lineBuffer = _onStderrLine is not null ? new StringBuilder() : null;
         try
         {
             int read;
@@ -128,7 +132,27 @@ internal sealed class AntigravityProcess : IAsyncDisposable
                     if (_stderr.Length > MaxStderrChars)
                         _stderr.Remove(0, _stderr.Length - MaxStderrChars);
                 }
+
+                if (lineBuffer is not null)
+                {
+                    for (var i = 0; i < read; i++)
+                    {
+                        var ch = buffer[i];
+                        if (ch == '\n')
+                        {
+                            _onStderrLine!(lineBuffer.ToString().TrimEnd('\r'));
+                            lineBuffer.Clear();
+                        }
+                        else
+                        {
+                            lineBuffer.Append(ch);
+                        }
+                    }
+                }
             }
+
+            if (lineBuffer is { Length: > 0 })
+                _onStderrLine!(lineBuffer.ToString().TrimEnd('\r'));
         }
         catch
         {

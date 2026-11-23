@@ -89,7 +89,7 @@ internal sealed class AntigravityUsage(
 
         await using var dir = new PrivateDirectory(root, "usage-");
         var (isolatedHome, _) = await AntigravityEnvironment.PrepareIsolatedHomeAsync(
-            dir, settings.AllowAiCredits, null, timeout.Token, configDirectory);
+            dir, settings.AllowAiCredits, null, timeout.Token, configDirectory, disableSlashCommands: false);
         var env = AntigravityEnvironment.BuildChildEnvironment(isolatedHome, explicitConfigDir: configDirectory);
         var work = dir.EnsureSubdirectory("work");
 
@@ -209,15 +209,25 @@ internal sealed class AntigravityUsage(
         labels["pool_order"] = string.Join(',', order);
 
         var tightest = pools.OrderBy(p => p.RemainingFraction).First();
-        var usedPercent = (int)Math.Clamp(Math.Round((1.0 - tightest.RemainingFraction) * 100.0), 0, 100);
-        var primary = new ProviderRateLimitWindow(
-            usedPercent,
-            tightest.WindowDuration ?? TimeSpan.FromHours(5),
-            tightest.ResetAt ?? now.AddHours(5));
+        var fiveHour = pools.Where(p => p.WindowDuration == TimeSpan.FromHours(5)).OrderBy(p => p.RemainingFraction).FirstOrDefault();
+        var weekly = pools.Where(p => p.WindowDuration == TimeSpan.FromDays(7)).OrderBy(p => p.RemainingFraction).FirstOrDefault();
 
+        ProviderRateLimitWindow primary;
+        ProviderRateLimitWindow? secondary = null;
+        if (fiveHour is not null && weekly is not null)
+        {
+            primary = ToRateLimitWindow(fiveHour, now);
+            secondary = ToRateLimitWindow(weekly, now);
+        }
+        else
+        {
+            primary = ToRateLimitWindow(tightest, now);
+        }
+
+        var tightestUsedPercent = (int)Math.Clamp(Math.Round((1.0 - tightest.RemainingFraction) * 100.0), 0, 100);
         var planType = ReadString(payload, "plan") ?? ReadString(payload, "plan_type") ?? ReadString(payload, "tier");
         var credits = ParseCredits(payload);
-        var limitReached = usedPercent >= 100 ? "quota_reached" : null;
+        var limitReached = tightestUsedPercent >= 100 ? "quota_reached" : null;
 
         return new ProviderUsageSnapshot(
             ObservedAt: now,
@@ -225,10 +235,17 @@ internal sealed class AntigravityUsage(
             Labels: labels,
             PlanType: planType,
             Primary: primary,
-            Secondary: null,
+            Secondary: secondary,
             Credits: credits,
             LimitReachedKind: limitReached,
             PluginId: "antigravity");
+    }
+
+    private static ProviderRateLimitWindow ToRateLimitWindow(QuotaPool pool, DateTimeOffset now)
+    {
+        var usedPercent = (int)Math.Clamp(Math.Round((1.0 - pool.RemainingFraction) * 100.0), 0, 100);
+        var duration = pool.WindowDuration ?? TimeSpan.FromHours(5);
+        return new ProviderRateLimitWindow(usedPercent, duration, pool.ResetAt ?? now.Add(duration));
     }
 
     private static JsonElement? FindUsagePayload(string raw)

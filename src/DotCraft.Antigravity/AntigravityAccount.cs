@@ -1,8 +1,78 @@
 using System.Text.RegularExpressions;
+using System.Threading.Channels;
 using DotCraft.Agents;
 using DotCraft.Configuration;
 
 namespace DotCraft.Antigravity;
+
+internal sealed class AntigravityAuthStatusCache
+{
+    private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(60);
+
+    private readonly object _gate = new();
+    private readonly SemaphoreSlim _probeGate = new(1, 1);
+    private ProviderAuthenticationStatus? _cached;
+    private DateTimeOffset _cachedAt = DateTimeOffset.MinValue;
+
+    public void Clear()
+    {
+        lock (_gate)
+        {
+            _cached = null;
+            _cachedAt = DateTimeOffset.MinValue;
+        }
+    }
+
+    public async Task<ProviderAuthenticationStatus> GetOrProbeAsync(
+        bool forceRefresh,
+        TimeProvider clock,
+        Func<CancellationToken, Task<ProviderAuthenticationStatus>> probe,
+        CancellationToken ct)
+    {
+        var now = clock.GetUtcNow();
+        if (!forceRefresh)
+        {
+            lock (_gate)
+            {
+                if (_cached is { IsAuthenticated: true } && now - _cachedAt < CacheTtl)
+                    return _cached;
+            }
+        }
+
+        await _probeGate.WaitAsync(ct);
+        try
+        {
+            if (!forceRefresh)
+            {
+                lock (_gate)
+                {
+                    if (_cached is { IsAuthenticated: true } && clock.GetUtcNow() - _cachedAt < CacheTtl)
+                        return _cached;
+                }
+            }
+
+            var result = await probe(ct);
+            lock (_gate)
+            {
+                if (result.IsAuthenticated)
+                {
+                    _cached = result;
+                    _cachedAt = clock.GetUtcNow();
+                }
+                else
+                {
+                    _cached = null;
+                    _cachedAt = DateTimeOffset.MinValue;
+                }
+            }
+            return result;
+        }
+        finally
+        {
+            _probeGate.Release();
+        }
+    }
+}
 
 internal sealed partial class AntigravityAccount(
     AntigravitySettings settings,
@@ -14,7 +84,8 @@ internal sealed partial class AntigravityAccount(
     CancellationToken providerStopping,
     Func<Task> stopRuns,
     TimeProvider? clock = null,
-    string? configDirectory = null)
+    string? configDirectory = null,
+    AntigravityAuthStatusCache? authCache = null)
 {
     public const string LoginHint =
         "Sign in to Antigravity from provider settings, or run `agy` (or `agy acp --login`) in your terminal, then try again.";
@@ -23,8 +94,12 @@ internal sealed partial class AntigravityAccount(
         "Antigravity CLI (`agy`) was not found. Install it from https://antigravity.google/download or set executablePath in plugin settings.";
 
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
+    private readonly AntigravityAuthStatusCache _authCache = authCache ?? new AntigravityAuthStatusCache();
 
-    public async Task<ProviderAuthenticationStatus> GetStatusAsync(CancellationToken ct)
+    public Task<ProviderAuthenticationStatus> GetStatusAsync(CancellationToken ct, bool forceRefresh = false) =>
+        _authCache.GetOrProbeAsync(forceRefresh, _clock, ProbeStatusAsync, ct);
+
+    private async Task<ProviderAuthenticationStatus> ProbeStatusAsync(CancellationToken ct)
     {
         var (executable, found) = AntigravityEnvironment.ResolveExecutable(settings.ExecutablePath);
         if (!found)
@@ -94,16 +169,16 @@ internal sealed partial class AntigravityAccount(
         CancellationToken ct)
     {
         if (!string.Equals(method, "cli", StringComparison.Ordinal))
-            throw new ArgumentException("Antigravity.AuthMethod: Unknown authentication method.");
+            throw new ProviderAuthenticationException("Antigravity.AuthMethod", "Unknown authentication method.");
 
-        var status = await GetStatusAsync(ct);
+        var status = await GetStatusAsync(ct, forceRefresh: true);
         if (status.FailureCode == "Antigravity.CliNotFound")
             throw new ProviderAuthenticationException("Antigravity.CliNotFound", InstallHint);
 
         if (!status.IsAuthenticated)
         {
             await SignInAsync(interaction, ct);
-            status = await GetStatusAsync(ct);
+            status = await GetStatusAsync(ct, forceRefresh: true);
             if (!status.IsAuthenticated)
                 throw new ProviderAuthenticationException("Antigravity.LoginRequired", LoginHint);
         }
@@ -131,74 +206,206 @@ internal sealed partial class AntigravityAccount(
             overrides["ANTIGRAVITY_CONFIG_DIR"] = configDirectory;
         var env = AntigravityEnvironment.BuildChildEnvironment(isolatedHome: null, overrides, configDirectory);
 
-        await using var process = new AntigravityProcess(executable, work, ["acp", "--login"], env);
-        string? url = null;
-        using (var linkWait = CancellationTokenSource.CreateLinkedTokenSource(token))
+        var urlFound = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        void TryCaptureUrl(string rawLine)
         {
-            linkWait.CancelAfter(TimeSpan.FromSeconds(30));
-            while (url is null && await process.Output.ReadLineAsync(linkWait.Token) is { } line)
-            {
-                var clean = AnsiRegex().Replace(line, string.Empty);
-                var match = LinkRegex().Match(clean);
-                if (match.Success) url = match.Value;
-            }
+            var clean = AnsiRegex().Replace(rawLine, string.Empty);
+            var match = LinkRegex().Match(clean);
+            if (match.Success) urlFound.TrySetResult(match.Value);
         }
 
-        if (url is null)
+        AntigravityProcess process;
+        try
         {
-            var stderrMatch = LinkRegex().Match(AnsiRegex().Replace(process.StderrTail, string.Empty));
-            if (stderrMatch.Success) url = stderrMatch.Value;
+            process = new AntigravityProcess(executable, work, ["acp", "--login"], env, onStderrLine: TryCaptureUrl);
         }
-
-        if (url is null)
+        catch (InvalidOperationException ex) when (ex.Message.StartsWith("Antigravity.CliNotFound", StringComparison.Ordinal))
+        {
+            throw new ProviderAuthenticationException("Antigravity.CliNotFound", InstallHint);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             throw new ProviderAuthenticationException(
                 "Antigravity.LoginFailed",
-                "Antigravity CLI did not emit a sign-in URL. Run `agy` or `agy acp --login` in your terminal to sign in, then retry.");
+                $"Could not start Antigravity CLI for sign-in: {ex.Message}");
         }
 
-        await interaction.NotifyAsync(new(
-            "auth_url",
-            "Sign in to Google Antigravity in your browser, then paste the authorization code below.",
-            url), token);
-
-        var last = string.Empty;
-        while (true)
+        await using (process)
         {
-            var code = await interaction.PromptAsync(new(
-                "manual_code",
-                "Paste the authorization code shown after signing in to Antigravity."), token);
-            await process.Input.WriteLineAsync(code.Trim().AsMemory(), token);
-            await process.Input.FlushAsync(token);
+            var stdoutLines = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleWriter = true, SingleReader = true });
+            var last = string.Empty;
+            var stdoutPump = Task.Run(async () =>
+            {
+                try
+                {
+                    while (await process.Output.ReadLineAsync(token) is { } line)
+                    {
+                        var clean = AnsiRegex().Replace(line, string.Empty).Trim();
+                        if (clean.Length > 0)
+                        {
+                            last = clean;
+                            TryCaptureUrl(clean);
+                        }
+                        await stdoutLines.Writer.WriteAsync(clean, token);
+                    }
+                }
+                catch (Exception ex) when (ex is OperationCanceledException or IOException)
+                {
+                }
+                finally
+                {
+                    stdoutLines.Writer.TryComplete();
+                }
+            }, CancellationToken.None);
 
-            if (await process.Output.ReadLineAsync(token) is not { } reply) break;
-            last = AnsiRegex().Replace(reply, string.Empty).Trim();
-            if (!last.Contains("Invalid code", StringComparison.OrdinalIgnoreCase)
-                && !last.Contains("Try again", StringComparison.OrdinalIgnoreCase))
-                break;
+            var exitTask = process.ExitAsync(token);
+
+            string? url = null;
+            using (var linkWait = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                linkWait.CancelAfter(TimeSpan.FromSeconds(30));
+                var timeoutTask = Task.Delay(Timeout.InfiniteTimeSpan, linkWait.Token);
+                var winner = await Task.WhenAny(urlFound.Task, exitTask, timeoutTask);
+                if (winner == urlFound.Task)
+                    url = await urlFound.Task;
+                else if (winner == exitTask)
+                {
+                    var earlyExitCode = await exitTask;
+                    await stdoutPump;
+                    if (earlyExitCode == 0)
+                        return;
+                    var detail = last.Length > 0 ? last : process.StderrTail.Trim();
+                    throw new ProviderAuthenticationException(
+                        "Antigravity.LoginFailed",
+                        detail.Length > 0 ? detail : "Antigravity CLI exited before completing sign-in.");
+                }
+                else
+                {
+                    token.ThrowIfCancellationRequested();
+                }
+            }
+
+            if (url is null)
+            {
+                var stderrMatch = LinkRegex().Match(AnsiRegex().Replace(process.StderrTail, string.Empty));
+                if (stderrMatch.Success) url = stderrMatch.Value;
+            }
+
+            if (url is null)
+            {
+                throw new ProviderAuthenticationException(
+                    "Antigravity.LoginFailed",
+                    "Antigravity CLI did not emit a sign-in URL. Run `agy` or `agy acp --login` in your terminal to sign in, then retry.");
+            }
 
             await interaction.NotifyAsync(new(
-                "info",
-                "That authorization code was not accepted. Copy the complete code and paste it again."), token);
-        }
+                "auth_url",
+                "Sign in to Google Antigravity in your browser, then paste the authorization code below.",
+                url), token);
 
-        while (await process.Output.ReadLineAsync(token) is { } line)
-        {
-            var clean = AnsiRegex().Replace(line, string.Empty).Trim();
-            if (clean.Length > 0) last = clean;
-        }
+            while (stdoutLines.Reader.TryRead(out _)) { }
 
-        if (await process.ExitAsync(token) != 0)
+            while (!exitTask.IsCompleted)
+            {
+                string code;
+                var promptExited = false;
+                using (var promptCts = CancellationTokenSource.CreateLinkedTokenSource(token))
+                {
+                    var promptGate = new object();
+                    var promptDisposed = false;
+                    _ = exitTask.ContinueWith(_ =>
+                    {
+                        lock (promptGate)
+                        {
+                            if (!promptDisposed)
+                                promptCts.Cancel();
+                        }
+                    }, TaskScheduler.Default);
+
+                    try
+                    {
+                        code = await interaction.PromptAsync(new(
+                            "manual_code",
+                            "Paste the authorization code shown after signing in to Antigravity."), promptCts.Token);
+                    }
+                    catch (OperationCanceledException) when (!token.IsCancellationRequested && exitTask.IsCompleted)
+                    {
+                        promptExited = true;
+                        code = string.Empty;
+                    }
+                    finally
+                    {
+                        lock (promptGate) promptDisposed = true;
+                    }
+                }
+
+                if (promptExited || exitTask.IsCompleted) break;
+
+                try
+                {
+                    await process.Input.WriteLineAsync(code.Trim().AsMemory(), token);
+                    await process.Input.FlushAsync(token);
+                }
+                catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+                {
+                    break;
+                }
+
+                var reply = await ReadNextNonEmptyLineOrExitAsync(stdoutLines.Reader, exitTask, token);
+                if (reply is null) break;
+                last = reply;
+                if (!last.Contains("Invalid code", StringComparison.OrdinalIgnoreCase)
+                    && !last.Contains("Try again", StringComparison.OrdinalIgnoreCase))
+                    break;
+
+                await interaction.NotifyAsync(new(
+                    "info",
+                    "That authorization code was not accepted. Copy the complete code and paste it again."), token);
+            }
+
+            var exitCode = await exitTask;
+            await stdoutPump;
+            if (exitCode != 0)
+            {
+                var detail = last.Length > 0 ? last : process.StderrTail.Trim();
+                throw new ProviderAuthenticationException(
+                    "Antigravity.LoginFailed",
+                    detail.Length > 0 ? detail : "Antigravity CLI could not complete sign-in.");
+            }
+        }
+    }
+
+    private static async Task<string?> ReadNextNonEmptyLineOrExitAsync(
+        ChannelReader<string> reader,
+        Task<int> exitTask,
+        CancellationToken ct)
+    {
+        while (true)
         {
-            var detail = last.Length > 0 ? last : process.StderrTail.Trim();
-            throw new ProviderAuthenticationException(
-                "Antigravity.LoginFailed",
-                detail.Length > 0 ? detail : "Antigravity CLI could not complete sign-in.");
+            while (reader.TryRead(out var immediate))
+            {
+                if (immediate.Length > 0) return immediate;
+            }
+
+            var waitTask = reader.WaitToReadAsync(ct).AsTask();
+            var completed = await Task.WhenAny(waitTask, exitTask);
+            if (completed == waitTask)
+            {
+                if (!await waitTask) return null;
+                continue;
+            }
+
+            while (reader.TryRead(out var drained))
+            {
+                if (drained.Length > 0) return drained;
+            }
+            return null;
         }
     }
 
     public async Task LogoutAsync(CancellationToken ct)
     {
+        _authCache.Clear();
         await stopRuns();
         limits.Clear();
         usage.ClearCache();
@@ -217,13 +424,14 @@ internal sealed partial class AntigravityAccount(
 
         await using var process = new AntigravityProcess(executable, work, ["-p", "/logout", "--output-format", "json"], env);
         var (exitCode, _, stderr) = await process.ReadToExitAsync(timeout.Token);
+        _authCache.Clear();
         if (exitCode != 0 && !AuthPromptRegex().IsMatch(stderr))
             throw new InvalidOperationException("Antigravity.LogoutFailed: Antigravity CLI could not sign out.");
     }
 
     public async Task<ModelCatalogResult> FetchModelsAsync(EffectiveModelRuntime runtime, CancellationToken ct)
     {
-        var status = await GetStatusAsync(ct);
+        var status = await GetStatusAsync(ct, forceRefresh: true);
         if (!status.IsAuthenticated)
         {
             return new ModelCatalogResult
