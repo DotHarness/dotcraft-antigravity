@@ -40,7 +40,7 @@ Idle conversation runs remain live for `idleTimeoutSeconds` (default 900 seconds
 ## Account, model discovery and runtime metadata
 
 - One `cli` authentication method (`Antigravity CLI account`) delegates credentials to `agy`.
-- Executable lookup honors `executablePath`, `ANTIGRAVITY_COMMAND` / `AGY_CLI_PATH` / `ANTIGRAVITY_CLI_PATH`, `PATH` and standard per-OS install locations.
+- Executable lookup honors `executablePath`, `ANTIGRAVITY_COMMAND` / `AGY_CLI_PATH` / `ANTIGRAVITY_CLI_PATH` and `PATH` before probing standard per-OS install locations, including `%LOCALAPPDATA%\agy\bin\agy.exe` on Windows.
 - `GetStatusAsync` verifies CLI presence (`Antigravity.CliNotFound`) and probes authentication via `agy models` (`Antigravity.LoginRequired` when unauthenticated), without ever reading credential contents.
 - `LoginAsync` completes immediately when the CLI is already signed in; otherwise it launches `agy acp --login` with `BROWSER=dotcraft-no-browser`, emits the printed sign-in link as an `auth_url` event, and writes each `manual_code` answer to `stdin` until sign-in completes.
 - `LogoutAsync` stops retained runs, clears cached catalog/usage/limit state, and invokes `agy -p "/logout" --output-format json`.

@@ -8,7 +8,7 @@
   "settings": "./settings.schema.json",
   "interface": {
     "displayName": "Antigravity",
-    "shortDescription": "Use your Google Antigravity CLI account in DotCraft",
+    "shortDescription": "Use your Google Antigravity CLI account",
     "longDescription": "Chat in DotCraft with models available to your signed-in local Google Antigravity CLI (agy) account, and monitor shared quota pools in the Composer.",
     "developerName": "DotHarness",
     "category": "Engineering",

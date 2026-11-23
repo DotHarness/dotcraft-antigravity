@@ -50,6 +50,7 @@ internal static partial class AntigravityEnvironment
             var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             if (!string.IsNullOrWhiteSpace(localAppData))
             {
+                candidates.Add(Path.Combine(localAppData, "agy", "bin", binary));
                 candidates.Add(Path.Combine(localAppData, "Programs", "agy", binary));
                 candidates.Add(Path.Combine(localAppData, "Microsoft", "WinGet", "Links", binary));
             }
