@@ -1,0 +1,346 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using DotCraft.Agents;
+using Microsoft.Extensions.AI;
+using Xunit;
+
+namespace DotCraft.Antigravity.Tests;
+
+public sealed class BackendSamplingTests
+{
+    [Fact]
+    public async Task ParallelToolsReturnToHostAndResumeTheSameCliProcessWithDeltaUsage()
+    {
+        await using var fixture = new BackendFixture();
+        using var scope = BackendFixture.Conversation();
+        var invoked = 0;
+        var options = Options(() => invoked++);
+        var history = new List<ChatMessage> { new(ChatRole.User, "parallel") };
+
+        var first = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
+
+        Assert.Equal(ChatFinishReason.ToolCalls, first.FinishReason);
+        var message = Assert.Single(first.Messages);
+        var calls = message.Contents.OfType<FunctionCallContent>().ToArray();
+        Assert.Equal(2, calls.Length);
+        Assert.Equal(new[] { "Echo.One", "Echo-Two" }.Order(), calls.Select(c => c.Name).Order());
+        Assert.Equal("Checking.", first.Text);
+        Assert.Equal(0, invoked);
+        var pid = Assert.Single(fixture.ChatPids);
+        Assert.True(BackendFixture.IsAlive(pid));
+
+        var callOne = calls.Single(c => c.Name == "Echo.One");
+        var callTwo = calls.Single(c => c.Name == "Echo-Two");
+        Assert.Equal("first", Assert.IsType<JsonElement>(callOne.Arguments!["value"]).GetString());
+        Assert.Equal("second", Assert.IsType<JsonElement>(callTwo.Arguments!["value"]).GetString());
+
+        history.AddRange(first.Messages);
+        history.Add(new(ChatRole.Tool,
+        [
+            new FunctionResultContent(callTwo.CallId, "B-result"),
+            new FunctionResultContent(callOne.CallId, "A-result")
+        ]));
+
+        var final = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
+
+        Assert.Equal("A-result|B-result", final.Text);
+        Assert.Equal(ChatFinishReason.Stop, final.FinishReason);
+        Assert.Equal(100, final.Usage!.InputTokenCount);
+        Assert.Equal(15, final.Usage.OutputTokenCount);
+        Assert.Equal(0, final.Usage.CachedInputTokenCount);
+        Assert.Equal(0, invoked);
+        Assert.Single(fixture.ChatPids);
+        Assert.True(BackendFixture.IsAlive(pid));
+
+        history.AddRange(final.Messages);
+        history.Add(new(ChatRole.User, "next question"));
+
+        var next = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
+
+        Assert.Equal("完成 ✓", next.Text);
+        Assert.Equal(pid, Assert.Single(fixture.ChatPids));
+        Assert.Equal(25, next.Usage!.InputTokenCount);
+        Assert.Equal(15, next.Usage.OutputTokenCount);
+        Assert.Equal(90, next.Usage.CachedInputTokenCount);
+        var turn = JsonNode.Parse(await File.ReadAllTextAsync(Assert.Single(Directory.GetFiles(fixture.Root, $"turn-{pid}-*.json"))))!;
+        Assert.Equal("user", turn["event"]!.GetValue<string>());
+        Assert.Equal("next question", turn["message"]!["content"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task ConsecutiveToolRoundsStayOnTheSameWorker()
+    {
+        await using var fixture = new BackendFixture();
+        using var scope = BackendFixture.Conversation();
+        var options = Options();
+        var history = new List<ChatMessage> { new(ChatRole.User, "two-rounds parallel") };
+
+        var first = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
+        var firstCalls = first.Messages.SelectMany(m => m.Contents).OfType<FunctionCallContent>().ToArray();
+        history.AddRange(first.Messages);
+        history.Add(new(ChatRole.Tool,
+        [
+            new FunctionResultContent(firstCalls.Single(c => c.Name == "Echo.One").CallId, "A"),
+            new FunctionResultContent(firstCalls.Single(c => c.Name == "Echo-Two").CallId, "B")
+        ]));
+
+        var second = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.Equal(ChatFinishReason.ToolCalls, second.FinishReason);
+        var thirdCall = Assert.Single(second.Messages.SelectMany(m => m.Contents).OfType<FunctionCallContent>());
+        Assert.Equal("Echo.One", thirdCall.Name);
+
+        history.AddRange(second.Messages);
+        history.Add(new(ChatRole.Tool, [new FunctionResultContent(thirdCall.CallId, "C")]));
+
+        var final = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.Equal("A|B|C", final.Text);
+        Assert.Single(fixture.ChatPids);
+    }
+
+    [Fact]
+    public async Task IsolatedRequestsCloseCliAndCleanRunDirectories()
+    {
+        await using var fixture = new BackendFixture();
+
+        var response = await fixture.Client.GetResponseAsync([new(ChatRole.User, "hello")]).WaitAsync(TimeSpan.FromSeconds(15));
+
+        Assert.Equal("完成 ✓", response.Text);
+        Assert.False(BackendFixture.IsAlive(Assert.Single(fixture.ChatPids)));
+        Assert.Empty(Directory.GetDirectories(fixture.Root, "run-*"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ShelvedConversationResumesByConversationIdOrFallsBackToColdStart(bool resumeFails)
+    {
+        await using var fixture = new BackendFixture();
+        using var scope = BackendFixture.Conversation();
+        var history = new List<ChatMessage> { new(ChatRole.User, "hello") };
+
+        var first = await fixture.Client.GetResponseAsync(history).WaitAsync(TimeSpan.FromSeconds(15));
+        var firstPid = Assert.Single(fixture.ChatPids);
+
+        await fixture.Backend.RetireIdleNowAsync();
+        Assert.False(BackendFixture.IsAlive(firstPid));
+
+        if (resumeFails)
+            await File.WriteAllTextAsync(Path.Combine(fixture.Root, "fake-resume-fails"), "");
+
+        history.AddRange(first.Messages);
+        history.Add(new(ChatRole.User, "next question"));
+
+        var next = await fixture.Client.GetResponseAsync(history).WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.Equal("完成 ✓", next.Text);
+
+        var captures = fixture.Files("capture-*.json").OrderBy(c => c.GetProperty("pid").GetInt32() == firstPid ? 0 : 1).ToArray();
+        if (resumeFails)
+        {
+            Assert.Equal(3, captures.Length);
+            var coldFallback = captures.Single(c => !c.GetProperty("args").EnumerateArray().Any(a => a.GetString() == "--conversation") && c.GetProperty("pid").GetInt32() != firstPid);
+            Assert.Contains("Conversation history", coldFallback.GetProperty("input").GetRawText());
+        }
+        else
+        {
+            var resumed = captures.Single(c => c.GetProperty("pid").GetInt32() != firstPid);
+            var args = resumed.GetProperty("args").EnumerateArray().Select(a => a.GetString()).ToArray();
+            Assert.Equal($"conv-{firstPid}", args[Array.IndexOf(args, "--conversation") + 1]);
+            Assert.Contains("next question", resumed.GetProperty("input").GetRawText());
+            Assert.DoesNotContain("Conversation history", resumed.GetProperty("input").GetRawText());
+        }
+    }
+
+    [Fact]
+    public async Task ColdStartWritesRelayAgentPermissionsIsolatedEnvAndNestedToolSchemas()
+    {
+        Environment.SetEnvironmentVariable("FAKE_HOST_API_KEY", "should-never-reach-agy");
+        try
+        {
+            await using var fixture = new BackendFixture(allowAiCredits: true);
+            var schema = JsonSerializer.Deserialize<JsonElement>("""
+                {"type":"object","properties":{"value":{"anyOf":[{"type":"string"},{"$ref":"#/$defs/Item"}]}},
+                 "$defs":{"Item":{"type":"object","properties":{"nested":{"type":"boolean"}}}}}
+                """);
+            var options = new ChatOptions
+            {
+                Instructions = "dotcraft instructions",
+                Tools = [AIFunctionFactory.CreateDeclaration("Inspect", "Inspect a value", schema)],
+                ToolMode = ChatToolMode.RequireSpecific("Inspect"),
+                ResponseFormat = ChatResponseFormat.ForJsonSchema(
+                    JsonSerializer.Deserialize<JsonElement>("""{"type":"object","properties":{"title":{"type":"string"}}}"""))
+            };
+            ChatMessage[] history =
+            [
+                new(ChatRole.System, "workspace instructions"),
+                new(new ChatRole("developer"), "developer instructions"),
+                new(ChatRole.User, "earlier user"),
+                new(ChatRole.Assistant, [new FunctionCallContent("prior", "Inspect", new Dictionary<string, object?> { ["value"] = "old" })]),
+                new(ChatRole.Tool, [new FunctionResultContent("prior", "earlier result")]),
+                new(ChatRole.User, "current user")
+            ];
+
+            var response = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
+
+            Assert.Equal("完成 ✓", response.Text);
+            var capture = fixture.Capture;
+            var agentMd = capture.GetProperty("agentMarkdown").GetString()!;
+            Assert.Contains("excludeDefaultComponents: true", agentMd);
+            Assert.Contains("inheritCustomizations: false", agentMd);
+            Assert.Contains("tools: []", agentMd);
+            Assert.Contains("dotcraft instructions", agentMd);
+            Assert.Contains("workspace instructions", agentMd);
+            Assert.Contains("developer instructions", agentMd);
+            Assert.Contains("You must call the Inspect tool", agentMd);
+            Assert.Contains("\"title\"", agentMd);
+
+            var settings = capture.GetProperty("settings");
+            Assert.True(settings.GetProperty("useG1Credits").GetBoolean());
+            Assert.Contains("mcp(dotcraft/*)", settings.GetProperty("permissions").GetProperty("allow").EnumerateArray().Select(e => e.GetString()));
+            Assert.Contains("command(*)", settings.GetProperty("permissions").GetProperty("deny").EnumerateArray().Select(e => e.GetString()));
+
+            Assert.Equal("true", capture.GetProperty("disableAutoUpdate").GetString());
+            Assert.Equal(JsonValueKind.Null, capture.GetProperty("leakedSecret").ValueKind);
+
+            var inputText = capture.GetProperty("input").GetProperty("message").GetProperty("content").GetString()!;
+            Assert.Contains("earlier user", inputText);
+            Assert.Contains("earlier result", inputText);
+            Assert.Contains("current user", inputText);
+
+            var advertised = Assert.Single(fixture.Files("tools-*.json")).GetProperty("result").GetProperty("tools")[0].GetProperty("inputSchema");
+            Assert.True(JsonNode.DeepEquals(JsonNode.Parse(schema.GetRawText()), JsonNode.Parse(advertised.GetRawText())));
+
+            var args = capture.GetProperty("args").EnumerateArray().Select(a => a.GetString()).ToArray();
+            Assert.Contains("--disable-slash-commands", args);
+            Assert.Equal("dotcraft-relay", args[Array.IndexOf(args, "--agent") + 1]);
+            Assert.DoesNotContain("--dangerously-skip-permissions", args);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("FAKE_HOST_API_KEY", null);
+        }
+    }
+
+    [Fact]
+    public async Task MediaAttachmentsMaterializeAuthorizeReadFileAndRespawnOnNewMedia()
+    {
+        await using var fixture = new BackendFixture();
+        using var scope = BackendFixture.Conversation();
+        var history = new List<ChatMessage>
+        {
+            new(ChatRole.User, [new TextContent("hello")])
+        };
+
+        var first = await fixture.Client.GetResponseAsync(history).WaitAsync(TimeSpan.FromSeconds(15));
+        var firstPid = Assert.Single(fixture.ChatPids);
+
+        history.AddRange(first.Messages);
+        history.Add(new(ChatRole.User,
+        [
+            new TextContent("media-read inspect this"),
+            new DataContent(new byte[] { 1, 2, 3, 4 }, "image/png")
+        ]));
+
+        var second = await fixture.Client.GetResponseAsync(history).WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.Equal("saw-image:4", second.Text);
+        Assert.Equal(2, fixture.ChatPids.Length);
+
+        var respawned = fixture.Files("capture-*.json").Single(c => c.GetProperty("pid").GetInt32() != firstPid);
+        var args = respawned.GetProperty("args").EnumerateArray().Select(a => a.GetString()).ToArray();
+        Assert.Equal($"conv-{firstPid}", args[Array.IndexOf(args, "--conversation") + 1]);
+        var allowRules = respawned.GetProperty("settings").GetProperty("permissions").GetProperty("allow")
+            .EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.Contains(allowRules, rule => rule.StartsWith("read_file(", StringComparison.Ordinal) && rule.EndsWith(".png)", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task UnauthorizedNativeToolStepFailsClosedAndKillsWorker()
+    {
+        await using var fixture = new BackendFixture();
+
+        var ex = await Assert.ThrowsAsync<NativeToolBlockedException>(() =>
+            fixture.Client.GetResponseAsync([new(ChatRole.User, "native-tool")]).WaitAsync(TimeSpan.FromSeconds(15)));
+
+        Assert.Contains("Antigravity.NativeToolBlocked", ex.Message);
+        Assert.Contains("run_command", ex.Message);
+        Assert.False(BackendFixture.IsAlive(Assert.Single(fixture.ChatPids)));
+    }
+
+    [Theory]
+    [InlineData("gemini-4-neon", "ExtraHigh", true, "gemini-4-neon-xhigh", "xhigh")]
+    [InlineData("gemini-4-neon", "High", false, "gemini-4-neon-low", "low")]
+    [InlineData("claude-sonnet-4-6", "High", true, "claude-sonnet-4-6", null)]
+    public async Task ModelAndEffortMapCorrectlyToCliFlags(
+        string modelId,
+        string effort,
+        bool reasoningEnabled,
+        string expectedSlug,
+        string? expectedEffortFlag)
+    {
+        await using var fixture = new BackendFixture();
+        var runtime = fixture.Runtime with { Model = modelId };
+        using var pipeline = ProviderPipelineOptionsScope.Push(new(runtime, effort, null, reasoningEnabled, "standard", false, null));
+        using var client = fixture.Provider.CreateChatClient(runtime);
+
+        await client.GetResponseAsync([new(ChatRole.User, "hello")]).WaitAsync(TimeSpan.FromSeconds(15));
+
+        var args = fixture.Capture.GetProperty("args").EnumerateArray().Select(a => a.GetString()).ToArray();
+        Assert.Equal(expectedSlug, args[Array.IndexOf(args, "--model") + 1]);
+        var actualEffort = Array.IndexOf(args, "--effort") is var idx and >= 0 ? args[idx + 1] : null;
+        Assert.Equal(expectedEffortFlag, actualEffort);
+    }
+
+    [Theory]
+    [InlineData("history")]
+    [InlineData("instructions")]
+    [InlineData("window")]
+    [InlineData("thread")]
+    [InlineData("model")]
+    [InlineData("tool-schema")]
+    public async Task ChangedConversationRebuildsFromCompleteHostHistory(string change)
+    {
+        await using var fixture = new BackendFixture();
+        using var originalScope = BackendFixture.Conversation();
+        var options = Options();
+        var history = new List<ChatMessage> { new(ChatRole.User, "parallel") };
+        var first = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
+        var calls = first.Messages.SelectMany(m => m.Contents).OfType<FunctionCallContent>().ToArray();
+        var oldPid = Assert.Single(fixture.ChatPids);
+
+        history.AddRange(first.Messages);
+        history.Add(new(ChatRole.Tool,
+        [
+            new FunctionResultContent(calls[0].CallId, "one"),
+            new FunctionResultContent(calls[1].CallId, "two")
+        ]));
+
+        if (change == "history") history[0] = new(ChatRole.User, "changed parallel");
+        if (change == "instructions") options.Instructions = "new instructions";
+        if (change == "tool-schema") options.Tools!.Add(AIFunctionFactory.Create(() => "new tool", "Extra"));
+        using var client = change == "model"
+            ? fixture.Provider.CreateChatClient(fixture.Runtime with { Model = "claude-sonnet-4-6" })
+            : null;
+        var activeClient = client ?? fixture.Client;
+        using var nextScope = BackendFixture.Conversation(
+            change == "thread" ? "fork" : "thread",
+            change == "window" ? "new-window" : "window");
+
+        var response = await activeClient.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
+
+        Assert.Equal("完成 ✓", response.Text);
+        Assert.Equal(2, fixture.ChatPids.Length);
+        if (change is not ("thread" or "window")) Assert.False(BackendFixture.IsAlive(oldPid));
+        var newest = fixture.Files("capture-*.json").Single(c => c.GetProperty("pid").GetInt32() != oldPid);
+        var input = newest.GetProperty("input").GetRawText();
+        Assert.Contains(calls[0].CallId, input);
+        Assert.Contains("one", input);
+    }
+
+    internal static ChatOptions Options(Action? invoked = null) => new()
+    {
+        Tools =
+        [
+            AIFunctionFactory.Create((string value) => { invoked?.Invoke(); return value; }, "Echo.One"),
+            AIFunctionFactory.Create((string value) => { invoked?.Invoke(); return value; }, "Echo-Two")
+        ]
+    };
+}

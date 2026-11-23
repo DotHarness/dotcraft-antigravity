@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "antigravity",
+  "version": "0.2.0",
+  "displayName": "Antigravity",
+  "description": "Use your local Google Antigravity CLI (agy) account for DotCraft conversations.",
+  "capabilities": ["dotnet", "desktop"],
+  "settings": "./settings.schema.json",
+  "interface": {
+    "displayName": "Antigravity",
+    "shortDescription": "Use your Google Antigravity CLI account in DotCraft",
+    "longDescription": "Chat in DotCraft with models available to your signed-in local Google Antigravity CLI (agy) account, and monitor shared quota pools in the Composer.",
+    "developerName": "DotHarness",
+    "category": "Engineering",
+    "capabilities": ["Chat", "Reasoning", "Vision", "Tool calling"],
+    "defaultPrompt": "Help me complete the next task in this project.",
+    "composerIcon": "./assets/antigravity.svg",
+    "logo": "./assets/antigravity.svg",
+    "websiteUrl": "https://github.com/DotHarness/dotcraft"
+  },
+  "desktop": {
+    "description": "Shows Antigravity shared quota pools, AI credits, and limit or account verification notices in the Composer.",
+    "entry": "./desktop/dist/index.mjs",
+    "styles": ["./desktop/dist/index.css"]
+  },
+  "dotnet": {
+    "displayName": "Antigravity models",
+    "description": "Adds local Antigravity CLI (agy) as a model provider.",
+    "minHostVersion": "0.13.1",
+    "entryAssembly": "./lib/DotHarness.Antigravity.Plugin.dll",
+    "entryType": "DotCraft.Antigravity.Plugin"
+  }
+}

@@ -1,0 +1,61 @@
+# Antigravity backend
+
+| Field | Value |
+|---|---|
+| Version | 0.3.0 |
+| Status | Living |
+| Date | 2026-11-23 |
+
+## Ownership
+
+The `antigravity` plugin contributes the `antigravity` model backend through DotCraft's model backend extension point and a Desktop module that owns the Composer subscription indicator. The official local Antigravity CLI (`agy`) owns model transport, Google/Enterprise authentication and credential storage. DotCraft owns instructions, conversation state, tool declarations, approval and execution.
+
+The plugin never embeds OAuth client credentials, never reads or parses stored OAuth token files or OS keyring secrets, and never calls undocumented Google Cloud Code Assist endpoints directly.
+
+## Workspace, agent and permission isolation
+
+Each conversation run uses a private directory under the plugin's data root (`PrivateDirectory`, current-user ACL on Windows and `0700` on POSIX), outside any user repository, with:
+
+- An isolated `HOME` / `USERPROFILE` directory containing `.gemini/antigravity-cli/settings.json` configured with `agentMode: ""`, `toolPermission: "request-review"`, `enableTerminalSandbox: false`, `disableSlashCommands: true`, `useG1Credits` set from `allowAiCredits`, `permissions.allow: ["mcp(dotcraft/*)"]`, and `permissions.deny: ["command(*)", "write_file(*)", "read_url(*)", "execute_url(*)"]`.
+- Credential bridging without reading secret contents: on systems with file-based CLI tokens (`jetski-standalone-oauth-token` or `antigravity-oauth-token`), the token file is linked into the isolated home; on macOS, `~/Library/Keychains` is symlinked unless `ANTIGRAVITY_CONFIG_DIR` is explicitly set; on Windows and Linux, Credential Manager and D-Bus Secret Service access are preserved (stripping SSH session env vars on Linux when no token file exists so `agy` uses keyring auth).
+- A scrubbed child environment that removes unrelated secret-looking variables (`*_API_KEY`, `*_TOKEN`, `*_SECRET`, database/webhook URLs, etc.) while keeping runtime essentials, proxy settings, TLS cert paths and `AGY_CLI_DISABLE_AUTO_UPDATE=true`.
+- A relay custom agent written to `<work>/.agents/agents/dotcraft-relay/agent.md` with `excludeDefaultComponents: true`, `inheritCustomizations: false`, `tools: []` and DotCraft's full system instructions (plus tool-name mapping, required tool-choice guidance and JSON response-format guidance) as its Markdown body.
+- A workspace MCP configuration written to `<work>/.agents/mcp_config.json` registering only the run's loopback Streamable HTTP `dotcraft` MCP server (`serverUrl`, `url`, per-run Bearer token and `timeoutSeconds: 3600`).
+
+## Sampling and tool continuation
+
+1. `agy` launches in persistent streaming mode: `--input-format stream-json --output-format stream-json --disable-slash-commands --agent dotcraft-relay --model <resolved-slug>` (adding `--effort <token>` only for models that accept effort variants, and `--conversation <id>` when resuming a shelved session).
+2. A cold run receives prior conversation as role-tagged JSON followed by the current user input on `stdin` (`{"event":"user","message":{"content":"..."}}`). Subsequent turns on the same live or resumed run send only the new user input so `agy` preserves its conversation and prompt cache.
+3. Because `agy --input-format stream-json` accepts only `text` blocks on `stdin`, image/audio/video `DataContent` attachments are materialized into the run's private media folder, granted exact `read_file(<path>)` and `view_file(<path>)` rules in the isolated `settings.json` (respawning with `--conversation <id>` if an existing live worker predated the rule), and referenced in the user message as `[Image](<path>)`.
+4. Stream events (`init`, `step_update`, `result`) project to provider-neutral `ChatResponseUpdate` items. Cumulative session usage reported by persistent `agy` workers is converted to per-turn deltas against the worker baseline.
+5. When the model calls one or more DotCraft tools through the loopback MCP server, the server mints unique call IDs, holds the HTTP `tools/call` requests open on pending completions, and coalesces concurrent calls arriving within a short batch window into one `ChatFinishReason.ToolCalls` boundary. DotCraft approves and executes the tools; the next sampling request supplies matching `FunctionResultContent` entries, completing the pending MCP calls so the same live `agy` process continues without restarting.
+6. Fail-closed guard: any `step_update` with `step_type == "tool"` targeting a tool outside the bridged `dotcraft` MCP catalog and authorized media-read paths immediately terminates the child process and fails the turn with `Antigravity.NativeToolBlocked`.
+
+Retained runs are scoped to provider, backend generation, thread, context window and request kind. Continuation requires matching instructions, model, effort, tools, `allowAiCredits` and history prefix. Any changed request or history starts a fresh run from the complete DotCraft conversation. Compaction and non-turn requests end their run at the final result, and requests without conversation identity use isolated runs.
+
+## Saved sessions
+
+Idle conversation runs remain live for `idleTimeoutSeconds` (default 900 seconds, up to 6 concurrent idle runs). On idle expiry or overflow, a run that finished at a non-tool boundary is shelved: its `agy` process exits while its isolated conversation directory stays on disk up to one hour (at most 64 shelved sessions). The next matching turn resumes it with `--conversation <id>` and sends only the new user input; if resume fails, the backend transparently falls back to a fresh cold run with full history in the same request. Every other retirement (unanswered tools, changed history, account change, sign-out or shutdown) deletes the isolated session directory immediately.
+
+## Account, model discovery and runtime metadata
+
+- One `cli` authentication method (`Antigravity CLI account`) delegates credentials to `agy`.
+- Executable lookup honors `executablePath`, `ANTIGRAVITY_COMMAND` / `AGY_CLI_PATH` / `ANTIGRAVITY_CLI_PATH`, `PATH` and standard per-OS install locations.
+- `GetStatusAsync` verifies CLI presence (`Antigravity.CliNotFound`) and probes authentication via `agy models` (`Antigravity.LoginRequired` when unauthenticated), without ever reading credential contents.
+- `LoginAsync` completes immediately when the CLI is already signed in; otherwise it launches `agy acp --login` with `BROWSER=dotcraft-no-browser`, emits the printed sign-in link as an `auth_url` event, and writes each `manual_code` answer to `stdin` until sign-in completes.
+- `LogoutAsync` stops retained runs, clears cached catalog/usage/limit state, and invokes `agy -p "/logout" --output-format json`.
+- Model discovery parses `agy models`, grouping effort-suffixed slugs (`-low`, `-medium`, `-high`, `-xhigh`, `-max`) into one public model entry with `ModelReasoningSupport` while preserving exact CLI slugs per effort. `IProviderModelRuntimeResolver` projects model metadata, vision capability and safe context window bounds (`239_000` default below `agy`'s internal auto-checkpoint limit, `200_000` for Claude, `128_000` for GPT-OSS).
+
+## Quota, early failure detection and usage
+
+- Usage queries run `agy -p "/usage" --output-format json` in an isolated workspace with single-flight execution and a 60-second cache, consuming zero inference tokens.
+- Returned quota groups and buckets map to `ProviderUsageSnapshot` (`Primary` for the tightest pool, `Values["pool.<key>.remaining"]`, `Values["pool.<key>.reset_epoch_ms"]`, `Labels["pool.<key>.name"]`, `Labels["pool_order"]`, plus optional `PlanType` and `Credits`).
+- Error messages from `result.error`, `stderr` and an isolated `cli-*.log` early-quota watchdog classify `RESOURCE_EXHAUSTED` / `Individual quota reached` (`quota_reached`), `AI credits balance is too low` (`credits_exhausted`) and `VALIDATION_REQUIRED` (`validation_required` with extracted `https://accounts.google.com/...` verification link), updating account limit state to avoid retry loops and surfacing banners in Desktop.
+
+## Desktop module
+
+The Desktop module wraps `composer.status.subscription` and adds `composer.before` exclusively for providers with `backendId === "antigravity"`. It displays shared quota pools, reset countdowns, plan label, AI credits balance and limit/verification banners using `provider/auth/usage`.
+
+## Run lifetime
+
+Cancellation, abandoned streams, account changes and shutdown end active runs and release child process trees, loopback MCP listeners, pending tool calls and private run directories.
