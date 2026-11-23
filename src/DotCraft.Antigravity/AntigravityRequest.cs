@@ -47,7 +47,7 @@ internal sealed class AntigravityRequest
         SystemPrompt = string.Join("\n\n", new[] { options?.Instructions }
             .Concat(Messages.Where(IsInstruction).Select(m => m.Text))
             .Append(Tools.Count > 0
-                ? "Use ONLY the declared `dotcraft` MCP tools when taking actions. Tool names in these instructions map to the available MCP tools as follows:\n" + Tools.Mapping
+                ? Tools.PromptSection
                 : "Do not invoke any built-in tools; answer directly with text.")
             .Append(ToolChoice(options?.ToolMode))
             .Append(ResponseFormat(options?.ResponseFormat))
@@ -321,6 +321,44 @@ internal sealed class AntigravityTools
     public string Mapping => new JsonObject(
         _byWire.Select(p => new KeyValuePair<string, JsonNode?>(p.Value.Name, JsonValue.Create(p.Key))))
         .ToJsonString(AntigravityJson.Compact);
+
+    public string PromptSection
+    {
+        get
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("# Tool protocol");
+            sb.AppendLine("You run as the model inside DotCraft. DotCraft, not you, executes tools. Use ONLY the declared `dotcraft` MCP tools listed below when taking actions.");
+            sb.AppendLine("- Call a tool via `call_mcp_tool` with `ServerName` set to \"dotcraft\", `ToolName` set to one of the tool wire names listed below, and `Arguments` set to a JSON object matching that tool's parameter schema.");
+            sb.AppendLine("- Never call `list_resources`, `read_resource`, `manage_task`, or any other built-in function, do not try to read MCP schema files from disk, and never write tool calls as text.");
+            sb.AppendLine("- When no tool is needed, answer directly.");
+            sb.AppendLine();
+            sb.AppendLine("Tool names in these instructions map to the available MCP tools as follows:");
+            sb.AppendLine(Mapping);
+            sb.AppendLine();
+            sb.AppendLine("# Available `dotcraft` MCP tools");
+            foreach (var (wireName, function) in _byWire)
+            {
+                sb.AppendLine();
+                sb.Append("### `").Append(wireName).Append('`');
+                if (!string.Equals(wireName, function.Name, StringComparison.Ordinal))
+                    sb.Append(" (maps from `").Append(function.Name).Append("`)");
+                sb.AppendLine();
+
+                if (!string.IsNullOrWhiteSpace(function.Description))
+                {
+                    sb.AppendLine(function.Description.Trim());
+                    sb.AppendLine();
+                }
+
+                sb.AppendLine("Parameters (JSON Schema):");
+                sb.AppendLine("```json");
+                sb.AppendLine(JsonNode.Parse(function.JsonSchema.GetRawText())!.ToJsonString(AntigravityJson.Compact));
+                sb.AppendLine("```");
+            }
+            return sb.ToString().TrimEnd();
+        }
+    }
 
     public AntigravityTools(IEnumerable<AITool> tools)
     {

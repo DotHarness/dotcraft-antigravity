@@ -193,17 +193,24 @@ internal sealed class AntigravityStreamDecoder(
         if (!info.TryGetProperty("parameters", out var parameters) || parameters.ValueKind != JsonValueKind.Object)
             return false;
 
-        var serverName = ReadString(parameters, "ServerName")
-            ?? ReadString(parameters, "serverName")
-            ?? ReadString(parameters, "server_name");
-        if (!string.Equals(serverName, AntigravityTools.ServerName, StringComparison.Ordinal))
+        var (serverName, targetTool) = ReadMcpTarget(parameters);
+        if (serverName is not null || targetTool is not null)
+            return IsDeclaredDotcraftTarget(serverName, targetTool);
+
+        if (!parameters.TryGetProperty("Arguments", out var nested) || nested.ValueKind != JsonValueKind.Object)
             return false;
 
-        var targetTool = ReadString(parameters, "ToolName")
-            ?? ReadString(parameters, "toolName")
-            ?? ReadString(parameters, "tool_name");
-        return tools.IsBridgedStreamToolName(targetTool);
+        var (nestedServer, nestedTool) = ReadMcpTarget(nested);
+        return IsDeclaredDotcraftTarget(nestedServer, nestedTool);
     }
+
+    private static (string? ServerName, string? ToolName) ReadMcpTarget(JsonElement parameters) => (
+        ReadString(parameters, "ServerName") ?? ReadString(parameters, "serverName") ?? ReadString(parameters, "server_name"),
+        ReadString(parameters, "ToolName") ?? ReadString(parameters, "toolName") ?? ReadString(parameters, "tool_name"));
+
+    private bool IsDeclaredDotcraftTarget(string? serverName, string? toolName) =>
+        string.Equals(serverName, AntigravityTools.ServerName, StringComparison.Ordinal)
+        && tools.IsBridgedStreamToolName(toolName);
 
     private static string? ReadString(JsonElement obj, string name) =>
         obj.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.String

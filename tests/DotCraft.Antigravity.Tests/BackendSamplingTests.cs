@@ -190,6 +190,8 @@ public sealed class BackendSamplingTests
             Assert.Contains("dotcraft instructions", agentMd);
             Assert.Contains("workspace instructions", agentMd);
             Assert.Contains("developer instructions", agentMd);
+            Assert.Contains("Inspect a value", agentMd);
+            Assert.Contains("\"$defs\"", agentMd);
             Assert.Contains("You must call the Inspect tool", agentMd);
             Assert.Contains("\"title\"", agentMd);
 
@@ -276,6 +278,33 @@ public sealed class BackendSamplingTests
         Assert.Contains("Antigravity.NativeToolBlocked", ex.Message);
         Assert.Contains("call_mcp_tool", ex.Message);
         Assert.False(BackendFixture.IsAlive(Assert.Single(fixture.ChatPids)));
+    }
+
+    [Fact]
+    public void StreamDecoderAllowsMalformedNestedDotcraftCallMcpToolButBlocksForeignTargets()
+    {
+        var tools = new AntigravityTools([AIFunctionFactory.Create((string code) => code, "CodeMode")]);
+        var decoder = new AntigravityStreamDecoder(
+            tools,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+            new AntigravityUsageBaseline(),
+            new AntigravityLimits(TimeProvider.System),
+            "gemini-4-hydrogen");
+
+        using var nestedValid = JsonDocument.Parse("""
+            {"event":"step_update","step_update":{"step_type":"tool","tool_name":"call_mcp_tool","tool_info":{"name":"call_mcp_tool","parameters":{"Arguments":{"ServerName":"dotcraft","ToolName":"CodeMode","Arguments":{"code":"text(1)"}}}}}}
+            """);
+        Assert.Empty(decoder.Read(nestedValid.RootElement, () => string.Empty).ToArray());
+
+        using var nestedForeign = JsonDocument.Parse("""
+            {"event":"step_update","step_update":{"step_type":"tool","tool_name":"call_mcp_tool","tool_info":{"name":"call_mcp_tool","parameters":{"Arguments":{"ServerName":"other","ToolName":"CodeMode"}}}}}
+            """);
+        Assert.Throws<NativeToolBlockedException>(() => decoder.Read(nestedForeign.RootElement, () => string.Empty).ToArray());
+
+        using var nestedUndeclared = JsonDocument.Parse("""
+            {"event":"step_update","step_update":{"step_type":"tool","tool_name":"call_mcp_tool","tool_info":{"name":"call_mcp_tool","parameters":{"Arguments":{"ServerName":"dotcraft","ToolName":"NotDeclared"}}}}}
+            """);
+        Assert.Throws<NativeToolBlockedException>(() => decoder.Read(nestedUndeclared.RootElement, () => string.Empty).ToArray());
     }
 
     [Theory]
