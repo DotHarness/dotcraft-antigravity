@@ -315,7 +315,9 @@ internal sealed class AntigravityUsage(
                 var label = FormatPoolLabel(groupName, window);
                 var key = SanitizeKey(bucketId ?? $"{groupName}_{window}", ++idx);
                 var duration = ParseWindowDuration(window);
-                pools.Add(new QuotaPool(key, label, clamped, resetAt, duration));
+                var isGemini = groupName.Contains("gemini", StringComparison.OrdinalIgnoreCase)
+                    || (bucketId?.Contains("gemini", StringComparison.OrdinalIgnoreCase) ?? false);
+                pools.Add(new QuotaPool(key, label, clamped, resetAt, duration, isGemini));
             }
         }
 
@@ -341,9 +343,12 @@ internal sealed class AntigravityUsage(
         }
         labels["pool_order"] = string.Join(',', order);
 
-        var tightest = pools.OrderBy(p => p.RemainingFraction).First();
-        var fiveHour = pools.Where(p => p.WindowDuration == TimeSpan.FromHours(5)).OrderBy(p => p.RemainingFraction).FirstOrDefault();
-        var weekly = pools.Where(p => p.WindowDuration == TimeSpan.FromDays(7)).OrderBy(p => p.RemainingFraction).FirstOrDefault();
+        var summaryPools = pools.Any(p => p.IsGemini)
+            ? pools.Where(p => p.IsGemini).ToList()
+            : pools;
+        var tightest = summaryPools.OrderBy(p => p.RemainingFraction).First();
+        var fiveHour = summaryPools.Where(p => p.WindowDuration == TimeSpan.FromHours(5)).OrderBy(p => p.RemainingFraction).FirstOrDefault();
+        var weekly = summaryPools.Where(p => p.WindowDuration == TimeSpan.FromDays(7)).OrderBy(p => p.RemainingFraction).FirstOrDefault();
 
         ProviderRateLimitWindow primary;
         ProviderRateLimitWindow? secondary = null;
@@ -495,5 +500,6 @@ internal sealed class AntigravityUsage(
         string DisplayName,
         double RemainingFraction,
         DateTimeOffset? ResetAt,
-        TimeSpan? WindowDuration);
+        TimeSpan? WindowDuration,
+        bool IsGemini);
 }

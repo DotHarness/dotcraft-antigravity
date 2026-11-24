@@ -162,9 +162,9 @@ public sealed class BackendAccountTests
         Assert.Equal(35.0, snapshot.Values["pool.claude_5h.remaining"]);
         Assert.Equal("Gemini (5h)", snapshot.Labels["pool.gemini_5h.name"]);
         Assert.Equal("Claude / GPT (5h)", snapshot.Labels["pool.claude_5h.name"]);
-        Assert.Equal(65, snapshot.Primary!.UsedPercent);
+        Assert.Equal(20, snapshot.Primary!.UsedPercent);
         Assert.Equal(TimeSpan.FromHours(5), snapshot.Primary.WindowDuration);
-        Assert.Equal(58, snapshot.Secondary!.UsedPercent);
+        Assert.Equal(50, snapshot.Secondary!.UsedPercent);
         Assert.Equal(TimeSpan.FromDays(7), snapshot.Secondary.WindowDuration);
 
         var processCountAfterFirstRead = fixture.Files("started-*.json").Length;
@@ -207,6 +207,57 @@ public sealed class BackendAccountTests
             logFixture.Client.GetResponseAsync([new(ChatRole.User, "early-log-quota")]).WaitAsync(TimeSpan.FromSeconds(15)));
         Assert.Equal("Antigravity.QuotaReached", earlyEx.Failure.ProviderErrorCode);
         Assert.False(BackendFixture.IsAlive(Assert.Single(logFixture.ChatPids)));
+    }
+
+    [Fact]
+    public void UsageSummaryPrefersGeminiPoolsOverOtherGroups()
+    {
+        const string json = """
+            {
+              "groups": [
+                {
+                  "name": "Gemini Models",
+                  "buckets": [
+                    { "id": "gemini-5h", "window": "5h", "remaining_fraction": 1.0 },
+                    { "id": "gemini-weekly", "window": "weekly", "remaining_fraction": 0.9 }
+                  ]
+                },
+                {
+                  "name": "Claude and GPT models",
+                  "buckets": [
+                    { "id": "claude-5h", "window": "5h", "remaining_fraction": 0.0 },
+                    { "id": "claude-weekly", "window": "weekly", "remaining_fraction": 0.42 }
+                  ]
+                }
+              ]
+            }
+            """;
+
+        var snapshot = AntigravityUsage.ParseUsageJson(json, DateTimeOffset.UtcNow);
+        Assert.NotNull(snapshot);
+        Assert.Equal(0, snapshot!.Primary!.UsedPercent);
+        Assert.Equal(10, snapshot.Secondary!.UsedPercent);
+        Assert.Null(snapshot.LimitReachedKind);
+        Assert.Equal(42.0, snapshot.Values["pool.claude_weekly.remaining"]);
+
+        const string nonGeminiOnly = """
+            {
+              "groups": [
+                {
+                  "name": "Claude and GPT models",
+                  "buckets": [
+                    { "id": "claude-5h", "window": "5h", "remaining_fraction": 0.6 },
+                    { "id": "claude-weekly", "window": "weekly", "remaining_fraction": 0.42 }
+                  ]
+                }
+              ]
+            }
+            """;
+
+        var fallback = AntigravityUsage.ParseUsageJson(nonGeminiOnly, DateTimeOffset.UtcNow);
+        Assert.NotNull(fallback);
+        Assert.Equal(40, fallback!.Primary!.UsedPercent);
+        Assert.Equal(58, fallback.Secondary!.UsedPercent);
     }
 
     private sealed class Interaction(params string[] answers) : IProviderLoginInteraction
