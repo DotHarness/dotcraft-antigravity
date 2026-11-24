@@ -23,6 +23,7 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
     private readonly AntigravityLimits _limits;
     private readonly AntigravityUsage _usage;
     private readonly CancellationTokenSource _stopping;
+    private readonly EventHandler _processExitHandler;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly Dictionary<string, AntigravityRun> _runs = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Shelved> _shelf = new(StringComparer.Ordinal);
@@ -59,6 +60,8 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
         _limits = new AntigravityLimits(_clock);
         _stopping = CancellationTokenSource.CreateLinkedTokenSource(stopping);
         _usage = new AntigravityUsage(settings, root, _limits, _stopping.Token, _clock, configDirectory);
+        _processExitHandler = static (_, _) => AntigravityProcess.TerminateTrackedProcesses();
+        AppDomain.CurrentDomain.ProcessExit += _processExitHandler;
 
         Directory.CreateDirectory(root);
         PrivateDirectory.SweepStale(root, "run-");
@@ -191,6 +194,11 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
                     }
                     catch (ProviderFailureException ex) when (ex.Failure.Kind == ProviderFailureKind.Unauthorized)
                     {
+                        if (attempt == 0 && !yieldedAny && AntigravityEnvironment.ResolveRealTokenPath(_configDirectory) is not null)
+                        {
+                            fallbackToCold = true;
+                            break;
+                        }
                         _authCache.Clear();
                         throw;
                     }
@@ -422,6 +430,7 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        AppDomain.CurrentDomain.ProcessExit -= _processExitHandler;
         await _stopping.CancelAsync();
         await StopRunsAsync();
         _stopping.Dispose();

@@ -145,7 +145,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
         }
 
         var env = AntigravityEnvironment.BuildChildEnvironment(_isolatedHome, explicitConfigDir: _configDirectory);
-        _process = new AntigravityProcess(executable, work, args, env);
+        _process = new AntigravityProcess(executable, work, args, env, pidFileDirectory: directory.Path);
         StartTurnWatchdog();
         _reader = ReadLoopAsync();
 
@@ -203,7 +203,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
                 _stagedCalls.Clear();
                 _turnContents.Clear();
                 _output = NewChannel();
-                _decoder = new(request.Tools, _allowedMediaPaths, _usageBaseline, _limits, request.ModelSlug);
+                _decoder = new(request.Tools, _allowedMediaPaths, _usageBaseline, _limits, request.ModelSlug, resumedAfterToolCall: true);
                 FlushDeferredUsageLocked();
             }
 
@@ -241,6 +241,9 @@ internal sealed class AntigravityRun : IAsyncDisposable
             _output = NewChannel();
             _decoder = new(request.Tools, _allowedMediaPaths, _usageBaseline, _limits, request.ModelSlug);
         }
+
+        if (!string.IsNullOrEmpty(_isolatedHome))
+            AntigravityEnvironment.SyncIsolatedToken(_isolatedHome, _configDirectory);
 
         StartTurnWatchdog();
         try

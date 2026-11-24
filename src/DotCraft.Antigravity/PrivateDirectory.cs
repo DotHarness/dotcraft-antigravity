@@ -80,7 +80,10 @@ internal sealed class PrivateDirectory : IAsyncDisposable
     {
         if (!Directory.Exists(root)) return;
         foreach (var dir in Directory.EnumerateDirectories(root, prefix + "*"))
+        {
+            AntigravityProcess.TryReapRecordedProcess(dir);
             TryDeleteTree(dir);
+        }
     }
 
     public async ValueTask DisposeAsync()

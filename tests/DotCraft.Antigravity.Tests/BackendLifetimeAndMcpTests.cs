@@ -27,6 +27,27 @@ public sealed class BackendLifetimeAndMcpTests
 
         Assert.False(BackendFixture.IsAlive(Assert.Single(fixture.ChatPids)));
         Assert.Empty(Directory.GetDirectories(fixture.Root, "run-*"));
+
+        var staleRoot = Path.Combine(fixture.Root, "stale-sweep");
+        var staleRun = PrivateDirectory.Create(Path.Combine(staleRoot, "run-orphan"));
+        using var sleeper = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(BackendFixture.Executable)
+        {
+            Arguments = "--input-format stream-json --output-format stream-json",
+            WorkingDirectory = staleRun,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        })!;
+        await File.WriteAllTextAsync(
+            Path.Combine(staleRun, AntigravityProcess.PidFileName),
+            $"{sleeper.Id}:{sleeper.StartTime.ToUniversalTime().Ticks}");
+
+        PrivateDirectory.SweepStale(staleRoot, "run-");
+
+        Assert.True(sleeper.HasExited);
+        Assert.False(Directory.Exists(staleRun));
     }
 
     [Fact]

@@ -10,7 +10,6 @@ internal sealed class AntigravityUsageBaseline
     public long? OutputTokens;
     public long? CacheReadTokens;
     public long? ReasoningTokens;
-    public long? TotalTokens;
     private bool _emittedStepUsageInTurn;
 
     public void MarkStepUsageEmitted() => _emittedStepUsageInTurn = true;
@@ -27,41 +26,37 @@ internal sealed class AntigravityUsageBaseline
 
     public UsageDetails ComputeDelta(JsonElement usage)
     {
-        var input = Delta(usage, "input_tokens", ref InputTokens);
+        var uncachedInput = Delta(usage, "input_tokens", ref InputTokens);
         var output = Delta(usage, "output_tokens", ref OutputTokens);
         var cached = Delta(usage, "cache_read_tokens", ref CacheReadTokens);
         var reasoning = Delta(usage, "thinking_tokens", ref ReasoningTokens);
-        var total = usage.TryGetProperty("total_tokens", out _)
-            ? Delta(usage, "total_tokens", ref TotalTokens)
-            : input + output;
+        var totalInput = uncachedInput + cached;
 
         return new UsageDetails
         {
-            InputTokenCount = input,
+            InputTokenCount = totalInput,
             OutputTokenCount = output,
             CachedInputTokenCount = cached,
             ReasoningTokenCount = reasoning > 0 ? reasoning : null,
-            TotalTokenCount = total
+            TotalTokenCount = totalInput + output
         };
     }
 
     public static UsageDetails? ParseStepUsage(JsonElement usage)
     {
-        var input = ReadLong(usage, "input_tokens");
+        var uncachedInput = ReadLong(usage, "input_tokens");
         var output = ReadLong(usage, "output_tokens");
         var cached = ReadLong(usage, "cache_read_tokens");
         var reasoning = ReadLong(usage, "thinking_tokens");
-        var total = usage.TryGetProperty("total_tokens", out _)
-            ? ReadLong(usage, "total_tokens")
-            : input + output;
+        var totalInput = uncachedInput + cached;
 
         var details = new UsageDetails
         {
-            InputTokenCount = input,
+            InputTokenCount = totalInput,
             OutputTokenCount = output,
             CachedInputTokenCount = cached,
             ReasoningTokenCount = reasoning > 0 ? reasoning : null,
-            TotalTokenCount = total
+            TotalTokenCount = totalInput + output
         };
         return HasTokens(details) ? details : null;
     }
@@ -99,7 +94,8 @@ internal sealed class AntigravityStreamDecoder(
     IReadOnlySet<string> allowedMediaPaths,
     AntigravityUsageBaseline usageBaseline,
     AntigravityLimits limits,
-    string modelId)
+    string modelId,
+    bool resumedAfterToolCall = false)
 {
     private static readonly HashSet<string> MediaTools = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -204,6 +200,9 @@ internal sealed class AntigravityStreamDecoder(
                     _text.Append(fallbackText);
                     finalItems.Add(new TextContent(fallbackText));
                 }
+
+                if (!_hasText && !resumedAfterToolCall)
+                    throw limits.ClassifyAndRecordError("Antigravity CLI returned an empty result.", stderrTail());
 
                 if (result.TryGetProperty("usage", out var resUsage)
                     && resUsage.ValueKind == JsonValueKind.Object

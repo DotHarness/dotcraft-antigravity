@@ -61,7 +61,7 @@ public sealed class BackendSamplingTests
 
         Assert.Equal("完成 ✓", next.Text);
         Assert.Equal(pid, Assert.Single(fixture.ChatPids));
-        Assert.Equal(25, next.Usage!.InputTokenCount);
+        Assert.Equal(115, next.Usage!.InputTokenCount);
         Assert.Equal(15, next.Usage.OutputTokenCount);
         Assert.Equal(90, next.Usage.CachedInputTokenCount);
         var turn = JsonNode.Parse(await File.ReadAllTextAsync(Assert.Single(Directory.GetFiles(fixture.Root, $"turn-{pid}-*.json"))))!;
@@ -156,6 +156,8 @@ public sealed class BackendSamplingTests
     public async Task ColdStartWritesRelayAgentPermissionsIsolatedEnvAndNestedToolSchemas()
     {
         Environment.SetEnvironmentVariable("FAKE_HOST_API_KEY", "should-never-reach-agy");
+        Environment.SetEnvironmentVariable("HTTPS_PROXY", "http://proxy.example:8080");
+        Environment.SetEnvironmentVariable("NO_PROXY", "internal.local");
         try
         {
             await using var fixture = new BackendFixture(allowAiCredits: true);
@@ -224,10 +226,20 @@ public sealed class BackendSamplingTests
             Assert.Contains("--disable-slash-commands", args);
             Assert.Equal("dotcraft-relay", args[Array.IndexOf(args, "--agent") + 1]);
             Assert.DoesNotContain("--dangerously-skip-permissions", args);
+            var childEnv = AntigravityEnvironment.BuildChildEnvironment("/tmp/home");
+            Assert.Contains("127.0.0.1", childEnv["NO_PROXY"].Split(','));
+            Assert.Contains("localhost", childEnv["NO_PROXY"].Split(','));
+            Assert.Contains("internal.local", childEnv["NO_PROXY"].Split(','));
+
+            var emptyEx = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                fixture.Client.GetResponseAsync([new(ChatRole.User, "empty-success")]).WaitAsync(TimeSpan.FromSeconds(15)));
+            Assert.Contains("empty result", emptyEx.Message, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {
             Environment.SetEnvironmentVariable("FAKE_HOST_API_KEY", null);
+            Environment.SetEnvironmentVariable("HTTPS_PROXY", null);
+            Environment.SetEnvironmentVariable("NO_PROXY", null);
         }
     }
 

@@ -340,6 +340,24 @@ while (true)
         return 0;
     }
 
+    if (text.Contains("empty-success", StringComparison.Ordinal))
+    {
+        Emit(new
+        {
+            @event = "result",
+            result = new
+            {
+                conversation_id = conversationId,
+                status = "SUCCESS",
+                response = "",
+                num_turns = turnNumber
+            }
+        });
+        line = await Console.In.ReadLineAsync();
+        if (line is null) return 0;
+        continue;
+    }
+
     if (Regex.IsMatch(text, @"\bhang\b"))
     {
         Emit(new

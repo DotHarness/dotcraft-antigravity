@@ -6,12 +6,16 @@ namespace DotCraft.Antigravity;
 
 internal sealed class AntigravityProcess : IAsyncDisposable
 {
+    public const string PidFileName = "worker.pid";
     private const int MaxStderrChars = 64 * 1024;
     private static readonly UTF8Encoding Utf8NoBom = new(encoderShouldEmitUTF8Identifier: false);
+    private static readonly object TrackedLock = new();
+    private static readonly HashSet<Process> TrackedProcesses = [];
 
     private readonly Process _process;
     private readonly Task _stderrTask;
     private readonly Action<string>? _onStderrLine;
+    private readonly string? _pidFilePath;
     private readonly object _stderrLock = new();
     private readonly StringBuilder _stderr = new();
     private int _disposed;
@@ -25,7 +29,8 @@ internal sealed class AntigravityProcess : IAsyncDisposable
         string workingDirectory,
         IEnumerable<string> arguments,
         IReadOnlyDictionary<string, string>? environment = null,
-        Action<string>? onStderrLine = null)
+        Action<string>? onStderrLine = null,
+        string? pidFileDirectory = null)
     {
         _onStderrLine = onStderrLine;
         var start = new ProcessStartInfo(executablePath)
@@ -60,6 +65,13 @@ internal sealed class AntigravityProcess : IAsyncDisposable
             throw new InvalidOperationException(
                 $"Antigravity.CliNotFound: Could not launch '{executablePath}'. Install the official Antigravity CLI (agy) or configure executablePath in plugin settings.",
                 ex);
+        }
+
+        lock (TrackedLock) TrackedProcesses.Add(_process);
+        if (!string.IsNullOrWhiteSpace(pidFileDirectory))
+        {
+            _pidFilePath = Path.Combine(pidFileDirectory, PidFileName);
+            TryWritePidFile(_pidFilePath, _process);
         }
 
         _stderrTask = DrainStderrAsync();
@@ -113,7 +125,73 @@ internal sealed class AntigravityProcess : IAsyncDisposable
         }
         finally
         {
+            lock (TrackedLock) TrackedProcesses.Remove(_process);
+            if (_pidFilePath is not null)
+            {
+                try { if (File.Exists(_pidFilePath)) File.Delete(_pidFilePath); }
+                catch { }
+            }
             _process.Dispose();
+        }
+    }
+
+    public static void TryReapRecordedProcess(string directoryPath)
+    {
+        var pidFile = Path.Combine(directoryPath, PidFileName);
+        if (!File.Exists(pidFile))
+            return;
+
+        try
+        {
+            var parts = File.ReadAllText(pidFile).Trim().Split(':');
+            if (parts.Length != 2 || !int.TryParse(parts[0], out var pid) || !long.TryParse(parts[1], out var startTicks))
+                return;
+
+            using var proc = Process.GetProcessById(pid);
+            if (proc.HasExited)
+                return;
+            if (Math.Abs(proc.StartTime.ToUniversalTime().Ticks - startTicks) > TimeSpan.FromSeconds(2).Ticks)
+                return;
+
+            proc.Kill(entireProcessTree: true);
+            proc.WaitForExit(2000);
+        }
+        catch
+        {
+        }
+    }
+
+    private static void TryWritePidFile(string pidFilePath, Process process)
+    {
+        try
+        {
+            var content = $"{process.Id}:{process.StartTime.ToUniversalTime().Ticks}";
+            File.WriteAllText(pidFilePath, content, Utf8NoBom);
+        }
+        catch
+        {
+        }
+    }
+
+    public static void TerminateTrackedProcesses()
+    {
+        Process[] snapshot;
+        lock (TrackedLock)
+        {
+            snapshot = [.. TrackedProcesses];
+            TrackedProcesses.Clear();
+        }
+
+        foreach (var proc in snapshot)
+        {
+            try
+            {
+                if (!proc.HasExited)
+                    proc.Kill(entireProcessTree: true);
+            }
+            catch
+            {
+            }
         }
     }
 

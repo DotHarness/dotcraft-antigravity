@@ -8,6 +8,8 @@ namespace DotCraft.Antigravity;
 internal static partial class AntigravityEnvironment
 {
     private static readonly string[] TokenFilenames = ["jetski-standalone-oauth-token", "antigravity-oauth-token"];
+    private static readonly string[] LoopbackHosts = ["localhost", "127.0.0.1", "::1"];
+    private static readonly string[] ProxyEnvVars = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"];
 
     private static readonly HashSet<string> AllowedSecretLikeNames = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -242,6 +244,8 @@ internal static partial class AntigravityEnvironment
             env.Remove("SSH_TTY");
         }
 
+        ApplyProxyEnvironment(env);
+
         if (overrides is not null)
         {
             foreach (var (key, value) in overrides)
@@ -249,6 +253,44 @@ internal static partial class AntigravityEnvironment
         }
 
         return env;
+    }
+
+    private static void ApplyProxyEnvironment(Dictionary<string, string> env)
+    {
+        var explicitProxy = Environment.GetEnvironmentVariable("ANTIGRAVITY_PROXY")?.Trim();
+        if (!string.IsNullOrEmpty(explicitProxy))
+        {
+            foreach (var key in ProxyEnvVars)
+                env[key] = explicitProxy;
+        }
+
+        var hasProxy = ProxyEnvVars.Any(key => env.TryGetValue(key, out var val) && !string.IsNullOrWhiteSpace(val));
+        if (!hasProxy)
+            return;
+
+        var merged = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var key in new[] { "NO_PROXY", "no_proxy" })
+        {
+            if (!env.TryGetValue(key, out var raw) || string.IsNullOrWhiteSpace(raw))
+                continue;
+            foreach (var part in raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                if (seen.Add(part))
+                    merged.Add(part);
+            }
+        }
+
+        foreach (var host in LoopbackHosts)
+        {
+            if (seen.Add(host))
+                merged.Add(host);
+        }
+
+        var noProxyValue = string.Join(',', merged);
+        env["NO_PROXY"] = noProxyValue;
+        if (!OperatingSystem.IsWindows())
+            env["no_proxy"] = noProxyValue;
     }
 
     private static bool ShouldStripEnvironmentVariable(string name)
