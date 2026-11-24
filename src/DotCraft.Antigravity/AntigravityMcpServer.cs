@@ -43,7 +43,7 @@ internal sealed class AntigravityMcpServer(
             server.Listen(IPAddress.Loopback, 0);
             server.Limits.MaxRequestBodySize = 16 * 1024 * 1024;
         });
-        builder.Services.AddMcpServer(options => options.ServerInfo = new() { Name = AntigravityTools.ServerName, Version = "0.1.1" })
+        builder.Services.AddMcpServer(options => options.ServerInfo = new() { Name = AntigravityTools.ServerName, Version = "0.1.2" })
             .WithHttpTransport(options => options.SessionMode = HttpServerSessionMode.Stateless)
             .WithListToolsHandler((_, _) => ValueTask.FromResult(new ListToolsResult { Tools = tools.ProtocolTools }))
             .WithCallToolHandler(CallAsync);
