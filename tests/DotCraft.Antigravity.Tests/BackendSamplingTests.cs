@@ -40,12 +40,17 @@ public sealed class BackendSamplingTests
         history.Add(new(ChatRole.Tool,
         [
             new FunctionResultContent(callTwo.CallId, "B-result"),
-            new FunctionResultContent(callOne.CallId, "A-result")
+            new FunctionResultContent(callOne.CallId, new AIContent[]
+            {
+                new TextContent("A-result"),
+                new DataContent(new byte[] { 1, 2 }, "image/png")
+            })
         ]));
 
         var final = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
 
-        Assert.Equal("A-result|B-result", final.Text);
+        Assert.Equal("A-result [image/png:2]|B-result", final.Text);
+        Assert.Equal(Assert.IsType<string>(first.ResponseId), final.ResponseId);
         Assert.Equal(ChatFinishReason.Stop, final.FinishReason);
         Assert.Equal(100, final.Usage!.InputTokenCount);
         Assert.Equal(15, final.Usage.OutputTokenCount);
@@ -70,7 +75,7 @@ public sealed class BackendSamplingTests
     }
 
     [Fact]
-    public async Task ConsecutiveToolRoundsStayOnTheSameWorker()
+    public async Task ConsecutiveToolRoundsStayOnTheSameWorkerAndRestartDoesNotReuseIds()
     {
         await using var fixture = new BackendFixture();
         using var scope = BackendFixture.Conversation();
@@ -97,6 +102,16 @@ public sealed class BackendSamplingTests
         var final = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
         Assert.Equal("A|B|C", final.Text);
         Assert.Single(fixture.ChatPids);
+
+        await fixture.Backend.RetireIdleNowAsync();
+        history.AddRange(final.Messages);
+        history.Add(new(ChatRole.User, "parallel"));
+        var resumed = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
+        var resumedCalls = resumed.Messages.SelectMany(m => m.Contents).OfType<FunctionCallContent>().ToArray();
+
+        Assert.Equal(2, fixture.ChatPids.Length);
+        Assert.NotEmpty(resumedCalls);
+        Assert.Empty(firstCalls.Append(thirdCall).Select(c => c.CallId).Intersect(resumedCalls.Select(c => c.CallId)));
     }
 
     [Fact]

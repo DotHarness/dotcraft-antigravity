@@ -26,7 +26,6 @@ internal sealed class AntigravityMcpServer(
     private readonly ConcurrentDictionary<string, TaskCompletionSource<CallToolResult>> _pending = new(StringComparer.Ordinal);
     private readonly string _token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
     private WebApplication? _app;
-    private long _sequence;
 
     public string Address { get; private set; } = string.Empty;
 
@@ -97,7 +96,7 @@ internal sealed class AntigravityMcpServer(
         if (request is null || !tools.Contains(request.Name))
             throw new McpProtocolException("Declared DotCraft tool is required.", McpErrorCode.InvalidParams);
 
-        var callId = $"agy_{Interlocked.Increment(ref _sequence)}";
+        var callId = $"agy_{Guid.NewGuid():N}";
         var arguments = new Dictionary<string, object?>(StringComparer.Ordinal);
         if (request.Arguments is not null)
         {

@@ -428,7 +428,9 @@ while (true)
         var a = mcp.CallToolAsync(listed[0].Name, new Dictionary<string, object?> { ["value"] = "first" }).AsTask();
         var b = mcp.CallToolAsync(listed[1].Name, new Dictionary<string, object?> { ["value"] = "second" }).AsTask();
         var results = await Task.WhenAll(a, b);
-        var reply = string.Join("|", results.Select(r => r.Content.OfType<TextContentBlock>().First().Text));
+        var reply = string.Join("|", results.Select(r =>
+            r.Content.OfType<TextContentBlock>().First().Text +
+            string.Concat(r.Content.OfType<ImageContentBlock>().Select(image => $" [{image.MimeType}:{image.DecodedData.Length}]"))));
 
         Emit(new
         {
