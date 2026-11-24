@@ -159,10 +159,18 @@ if (firstLine is null) return 0;
 var resume = Array.IndexOf(args, "--conversation") is var rIdx and >= 0 && rIdx + 1 < args.Length
     ? args[rIdx + 1]
     : null;
-var conversationId = resume ?? $"conv-{pid}";
+var hasTimingFixture = firstLine.Contains("native-timing-fixture", StringComparison.Ordinal);
+var conversationId = resume ?? (hasTimingFixture ? Guid.NewGuid().ToString("D") : $"conv-{pid}");
 
 var home = Environment.GetEnvironmentVariable("HOME") ?? "";
-var settingsPath = Path.Combine(home, ".gemini", "antigravity-cli", "settings.json");
+var geminiDir = Path.Combine(home, ".gemini", "antigravity-cli");
+var timingFixture = Path.Combine(root, "fake-timing.db");
+if (hasTimingFixture && File.Exists(timingFixture))
+{
+    var conversations = Directory.CreateDirectory(Path.Combine(geminiDir, "conversations"));
+    File.Copy(timingFixture, Path.Combine(conversations.FullName, $"{conversationId}.db"));
+}
+var settingsPath = Path.Combine(geminiDir, "settings.json");
 var settingsJson = File.Exists(settingsPath) ? await File.ReadAllTextAsync(settingsPath) : "{}";
 var agentPath = Path.Combine(cwd, ".agents", "agents", "dotcraft-relay", "agent.md");
 var agentMarkdown = File.Exists(agentPath) ? await File.ReadAllTextAsync(agentPath) : "";

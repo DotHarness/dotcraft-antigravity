@@ -7,6 +7,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="DotCraft.Harness" Version="0.13.1" PrivateAssets="all" ExcludeAssets="runtime" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.11" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.4.0" GeneratePathProperty="true" />
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <InternalsVisibleTo Include="DotCraft.Antigravity.Tests" />

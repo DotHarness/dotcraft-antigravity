@@ -4,7 +4,7 @@
 |---|---|
 | Version | 0.3.0 |
 | Status | Living |
-| Date | 2026-11-23 |
+| Date | 2026-11-24 |
 
 ## Ownership
 
@@ -30,6 +30,8 @@ Each conversation run uses a private directory under the plugin's data root (`Pr
 4. Stream events (`init`, `step_update`, `result`) project to provider-neutral `ChatResponseUpdate` items. Total input tokens combine uncached `input_tokens` with `cache_read_tokens` to match DotCraft's usage contract. Per-step `usage` from completed non-checkpoint `step_update` events is emitted immediately (including mid-turn before tool calls). When a turn produces no step-level usage, cumulative session usage from `result` is converted to per-turn deltas against the worker baseline. A `result` with `status == "SUCCESS"` that produced neither text nor prior tool activity fails the turn instead of committing an empty response.
 5. When the model calls one or more DotCraft tools through the loopback MCP server, the server mints unique call IDs, holds the HTTP `tools/call` requests open on pending completions, and coalesces concurrent calls arriving within a short batch window into one `ChatFinishReason.ToolCalls` boundary. DotCraft approves and executes the tools; the next sampling request supplies matching `FunctionResultContent` entries, completing the pending MCP calls so the same live `agy` process continues without restarting.
 6. Fail-closed guard: any `step_update` with `step_type == "tool"` targeting a tool outside the bridged `dotcraft` MCP catalog (including `call_mcp_tool` invocations whose `ServerName` is `dotcraft` and `ToolName` is declared) and authorized media-read paths immediately terminates the child process and fails the turn with `Antigravity.NativeToolBlocked`.
+
+Generation speed and first-token latency use Antigravity's own timing. The plugin reads generation metadata only from the run's isolated CLI session and reports timing only when it matches the usage for the same generation. Missing, ambiguous, or unreadable metadata does not affect the turn or its token counts. The host does not infer timing from CLI output arrival because `agy` can batch generated output.
 
 Retained runs are scoped to provider, backend generation, thread, context window and request kind. Continuation requires matching instructions, model, effort, tools, `allowAiCredits` and history prefix. Any changed request or history starts a fresh run from the complete DotCraft conversation. Compaction and non-turn requests end their run at the final result, and requests without conversation identity use isolated runs.
 

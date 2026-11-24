@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
+using DotCraft.Tracing;
 using Microsoft.Extensions.AI;
 
 namespace DotCraft.Antigravity;
@@ -332,6 +333,14 @@ internal sealed class AntigravityRun : IAsyncDisposable
         }
     }
 
+    private TokenUsageRequestTiming? ReadTiming(string? conversationId, int stepIndex, UsageDetails usage) =>
+        AntigravityRequestTiming.Read(
+            _isolatedGeminiDir,
+            conversationId ?? ConversationId,
+            stepIndex,
+            usage.OutputTokenCount.GetValueOrDefault(),
+            usage.ReasoningTokenCount);
+
     private async Task ReadLoopAsync()
     {
         try
@@ -359,7 +368,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
                     IEnumerable<ChatResponseUpdate> updates;
                     try
                     {
-                        updates = decoder.Read(document.RootElement, () => _process.StderrTail).ToArray();
+                        updates = decoder.Read(document.RootElement, () => _process.StderrTail, ReadTiming).ToArray();
                     }
                     catch (NativeToolBlockedException)
                     {
@@ -388,7 +397,11 @@ internal sealed class AntigravityRun : IAsyncDisposable
                             {
                                 foreach (var content in update.Contents)
                                 {
-                                    if (content is UsageContent uc) _deferredUsage.Add(uc);
+                                    if (content is UsageContent usage)
+                                    {
+                                        TokenUsageRequestTiming.Attach(usage, null!);
+                                        _deferredUsage.Add(usage);
+                                    }
                                 }
                             }
                         }

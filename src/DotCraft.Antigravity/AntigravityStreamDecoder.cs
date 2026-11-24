@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using DotCraft.Tracing;
 using Microsoft.Extensions.AI;
 
 namespace DotCraft.Antigravity;
@@ -105,6 +106,7 @@ internal sealed class AntigravityStreamDecoder(
 
     private readonly StringBuilder _text = new();
     private readonly HashSet<int> _emittedUsageSteps = [];
+    private bool _emittedStepUsage;
     private bool _hasText;
 
     public string? ConversationId { get; private set; }
@@ -113,7 +115,10 @@ internal sealed class AntigravityStreamDecoder(
 
     public string AccumulatedText => _text.ToString();
 
-    public IEnumerable<ChatResponseUpdate> Read(JsonElement line, Func<string> stderrTail)
+    public IEnumerable<ChatResponseUpdate> Read(
+        JsonElement line,
+        Func<string> stderrTail,
+        Func<string?, int, UsageDetails, TokenUsageRequestTiming?>? readTiming = null)
     {
         if (!line.TryGetProperty("event", out var eventProp) || eventProp.ValueKind != JsonValueKind.String)
             yield break;
@@ -163,10 +168,14 @@ internal sealed class AntigravityStreamDecoder(
                 }
 
                 if (!string.Equals(stepType, "checkpoint", StringComparison.OrdinalIgnoreCase)
-                    && TryReadStepUsage(step) is { } stepUsageDetails)
+                    && TryReadStepUsage(step, out var stepIndex) is { } stepUsageDetails)
                 {
+                    var timing = !_emittedStepUsage && stepIndex is int index
+                        ? readTiming?.Invoke(ConversationId, index, stepUsageDetails)
+                        : null;
+                    _emittedStepUsage = true;
                     usageBaseline.MarkStepUsageEmitted();
-                    stepContents.Add(new UsageContent(stepUsageDetails));
+                    stepContents.Add(CreateUsage(stepUsageDetails, timing));
                 }
 
                 if (stepContents.Count > 0)
@@ -208,7 +217,7 @@ internal sealed class AntigravityStreamDecoder(
                     && resUsage.ValueKind == JsonValueKind.Object
                     && usageBaseline.ConsumeResult(resUsage) is { } fallbackUsage)
                 {
-                    finalItems.Add(new UsageContent(fallbackUsage));
+                    finalItems.Add(CreateUsage(fallbackUsage, null));
                 }
 
                 FinalResult = true;
@@ -217,8 +226,16 @@ internal sealed class AntigravityStreamDecoder(
         }
     }
 
-    private UsageDetails? TryReadStepUsage(JsonElement step)
+    private static UsageContent CreateUsage(UsageDetails usage, TokenUsageRequestTiming? timing)
     {
+        var content = new UsageContent(usage);
+        TokenUsageRequestTiming.Attach(content, timing!);
+        return content;
+    }
+
+    private UsageDetails? TryReadStepUsage(JsonElement step, out int? stepIndex)
+    {
+        stepIndex = null;
         if (!step.TryGetProperty("usage", out var stepUsage) || stepUsage.ValueKind != JsonValueKind.Object)
             return null;
 
@@ -228,10 +245,11 @@ internal sealed class AntigravityStreamDecoder(
         if (!string.IsNullOrWhiteSpace(state) && !string.Equals(state, "DONE", StringComparison.OrdinalIgnoreCase))
             return null;
 
-        if (step.TryGetProperty("step_index", out var idxProp) && idxProp.ValueKind == JsonValueKind.Number && idxProp.TryGetInt32(out var stepIndex))
+        if (step.TryGetProperty("step_index", out var idxProp) && idxProp.ValueKind == JsonValueKind.Number && idxProp.TryGetInt32(out var index))
         {
-            if (!_emittedUsageSteps.Add(stepIndex))
+            if (!_emittedUsageSteps.Add(index))
                 return null;
+            stepIndex = index;
         }
 
         return AntigravityUsageBaseline.ParseStepUsage(stepUsage);
