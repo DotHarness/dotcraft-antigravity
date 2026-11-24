@@ -76,7 +76,6 @@ internal static class AntigravityRequestTiming
     {
         timing = null;
         ReadOnlySpan<byte> model = default;
-        var stepCount = 0;
         var matchedStep = false;
         var row = new ProtoReader(record);
         while (row.Next())
@@ -87,21 +86,17 @@ internal static class AntigravityRequestTiming
                     model = row.Bytes;
                     break;
                 case (2, 0):
-                    stepCount++;
                     matchedStep |= row.Number == (ulong)stepIndex;
                     break;
                 case (2, 2):
                     var indices = new ProtoReader(row.Bytes);
                     while (!indices.Done)
-                    {
-                        stepCount++;
                         matchedStep |= indices.Varint() == (ulong)stepIndex;
-                    }
                     break;
             }
         }
 
-        if (!matchedStep || stepCount != 1 || model.IsEmpty)
+        if (!matchedStep || model.IsEmpty)
             return false;
 
         ulong output = 0, reasoning = 0;
