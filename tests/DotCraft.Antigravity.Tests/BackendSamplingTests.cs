@@ -178,7 +178,8 @@ public sealed class BackendSamplingTests
                 new(ChatRole.User, "earlier user"),
                 new(ChatRole.Assistant, [new FunctionCallContent("prior", "Inspect", new Dictionary<string, object?> { ["value"] = "old" })]),
                 new(ChatRole.Tool, [new FunctionResultContent("prior", "earlier result")]),
-                new(ChatRole.User, "current user")
+                new(ChatRole.User, "current user"),
+                new(ChatRole.User, "current guidance")
             ];
 
             var response = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
@@ -206,9 +207,15 @@ public sealed class BackendSamplingTests
             Assert.Equal(JsonValueKind.Null, capture.GetProperty("leakedSecret").ValueKind);
 
             var inputText = capture.GetProperty("input").GetProperty("message").GetProperty("content").GetString()!;
-            Assert.Contains("earlier user", inputText);
-            Assert.Contains("earlier result", inputText);
-            Assert.Contains("current user", inputText);
+            var currentMarker = inputText.IndexOf("Current user request:\n", StringComparison.Ordinal);
+            Assert.True(currentMarker > 0);
+            var historySection = inputText[..currentMarker];
+            var currentSection = inputText[currentMarker..];
+            Assert.Contains("earlier user", historySection);
+            Assert.Contains("earlier result", historySection);
+            Assert.DoesNotContain("current user", historySection);
+            Assert.Contains("current user", currentSection);
+            Assert.Contains("current guidance", currentSection);
 
             var advertised = Assert.Single(fixture.Files("tools-*.json")).GetProperty("result").GetProperty("tools")[0].GetProperty("inputSchema");
             Assert.True(JsonNode.DeepEquals(JsonNode.Parse(schema.GetRawText()), JsonNode.Parse(advertised.GetRawText())));

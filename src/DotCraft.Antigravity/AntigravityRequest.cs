@@ -89,8 +89,12 @@ internal sealed class AntigravityRequest
         CancellationToken ct)
     {
         var conversation = Messages.Where(m => !IsInstruction(m)).ToArray();
-        var lastUser = conversation.LastOrDefault()?.Role == ChatRole.User ? conversation[^1] : null;
-        var prior = lastUser is null ? conversation : conversation[..^1];
+        var trailingStart = conversation.Length;
+        while (trailingStart > 0 && conversation[trailingStart - 1].Role == ChatRole.User)
+            trailingStart--;
+
+        var prior = conversation[..trailingStart];
+        var trailingUsers = conversation[trailingStart..];
         var mediaPaths = new List<string>();
         var sections = new List<string>();
 
@@ -111,11 +115,20 @@ internal sealed class AntigravityRequest
                 sections.Add("Attachments from conversation history:\n" + string.Join("\n", priorMediaRefs));
         }
 
-        if (lastUser is not null)
+        if (trailingUsers.Length > 0)
         {
-            var userText = await RenderMessageContentsAsync(lastUser.Contents, directory, mediaPaths, ct);
-            if (!string.IsNullOrEmpty(userText))
-                sections.Add(userText);
+            var userParts = new List<string>(trailingUsers.Length);
+            foreach (var userMessage in trailingUsers)
+            {
+                var userText = await RenderMessageContentsAsync(userMessage.Contents, directory, mediaPaths, ct);
+                if (!string.IsNullOrEmpty(userText))
+                    userParts.Add(userText);
+            }
+            if (userParts.Count > 0)
+            {
+                var currentUser = string.Join("\n\n", userParts);
+                sections.Add(prior.Length > 0 ? "Current user request:\n" + currentUser : currentUser);
+            }
         }
         else
         {
