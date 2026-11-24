@@ -9,13 +9,28 @@ internal sealed class AntigravityUsageBaseline
     public long? InputTokens;
     public long? OutputTokens;
     public long? CacheReadTokens;
+    public long? ReasoningTokens;
     public long? TotalTokens;
+    private bool _emittedStepUsageInTurn;
+
+    public void MarkStepUsageEmitted() => _emittedStepUsageInTurn = true;
+
+    public UsageDetails? ConsumeResult(JsonElement usage)
+    {
+        var delta = ComputeDelta(usage);
+        var alreadyEmitted = _emittedStepUsageInTurn;
+        _emittedStepUsageInTurn = false;
+        if (alreadyEmitted || !HasTokens(delta))
+            return null;
+        return delta;
+    }
 
     public UsageDetails ComputeDelta(JsonElement usage)
     {
         var input = Delta(usage, "input_tokens", ref InputTokens);
         var output = Delta(usage, "output_tokens", ref OutputTokens);
         var cached = Delta(usage, "cache_read_tokens", ref CacheReadTokens);
+        var reasoning = Delta(usage, "thinking_tokens", ref ReasoningTokens);
         var total = usage.TryGetProperty("total_tokens", out _)
             ? Delta(usage, "total_tokens", ref TotalTokens)
             : input + output;
@@ -25,9 +40,42 @@ internal sealed class AntigravityUsageBaseline
             InputTokenCount = input,
             OutputTokenCount = output,
             CachedInputTokenCount = cached,
+            ReasoningTokenCount = reasoning > 0 ? reasoning : null,
             TotalTokenCount = total
         };
     }
+
+    public static UsageDetails? ParseStepUsage(JsonElement usage)
+    {
+        var input = ReadLong(usage, "input_tokens");
+        var output = ReadLong(usage, "output_tokens");
+        var cached = ReadLong(usage, "cache_read_tokens");
+        var reasoning = ReadLong(usage, "thinking_tokens");
+        var total = usage.TryGetProperty("total_tokens", out _)
+            ? ReadLong(usage, "total_tokens")
+            : input + output;
+
+        var details = new UsageDetails
+        {
+            InputTokenCount = input,
+            OutputTokenCount = output,
+            CachedInputTokenCount = cached,
+            ReasoningTokenCount = reasoning > 0 ? reasoning : null,
+            TotalTokenCount = total
+        };
+        return HasTokens(details) ? details : null;
+    }
+
+    private static bool HasTokens(UsageDetails details) =>
+        (details.InputTokenCount ?? 0) > 0
+        || (details.OutputTokenCount ?? 0) > 0
+        || (details.CachedInputTokenCount ?? 0) > 0
+        || (details.ReasoningTokenCount ?? 0) > 0;
+
+    private static long ReadLong(JsonElement usage, string property) =>
+        usage.TryGetProperty(property, out var prop) && prop.ValueKind == JsonValueKind.Number && prop.TryGetInt64(out var value) && value > 0
+            ? value
+            : 0;
 
     private static long Delta(JsonElement usage, string property, ref long? baseline)
     {
@@ -60,7 +108,7 @@ internal sealed class AntigravityStreamDecoder(
     };
 
     private readonly StringBuilder _text = new();
-    private JsonElement? _lastStepUsage;
+    private readonly HashSet<int> _emittedUsageSteps = [];
     private bool _hasText;
 
     public string? ConversationId { get; private set; }
@@ -98,9 +146,6 @@ internal sealed class AntigravityStreamDecoder(
                 if (step.TryGetProperty("conversation_id", out var stepConv) && stepConv.ValueKind == JsonValueKind.String)
                     SetConversationId(stepConv.GetString());
 
-                if (step.TryGetProperty("usage", out var stepUsage) && stepUsage.ValueKind == JsonValueKind.Object)
-                    _lastStepUsage = stepUsage.Clone();
-
                 var stepType = step.TryGetProperty("step_type", out var st) && st.ValueKind == JsonValueKind.String
                     ? st.GetString()
                     : null;
@@ -111,14 +156,25 @@ internal sealed class AntigravityStreamDecoder(
                     yield break;
                 }
 
+                var stepContents = new List<AIContent>();
                 if (step.TryGetProperty("text_delta", out var deltaProp)
                     && deltaProp.ValueKind == JsonValueKind.String
                     && deltaProp.GetString() is { Length: > 0 } delta)
                 {
                     _hasText = true;
                     _text.Append(delta);
-                    yield return CreateUpdate([new TextContent(delta)]);
+                    stepContents.Add(new TextContent(delta));
                 }
+
+                if (!string.Equals(stepType, "checkpoint", StringComparison.OrdinalIgnoreCase)
+                    && TryReadStepUsage(step) is { } stepUsageDetails)
+                {
+                    usageBaseline.MarkStepUsageEmitted();
+                    stepContents.Add(new UsageContent(stepUsageDetails));
+                }
+
+                if (stepContents.Count > 0)
+                    yield return CreateUpdate(stepContents);
                 break;
 
             case "result":
@@ -149,16 +205,37 @@ internal sealed class AntigravityStreamDecoder(
                     finalItems.Add(new TextContent(fallbackText));
                 }
 
-                JsonElement? usageEl = result.TryGetProperty("usage", out var resUsage) && resUsage.ValueKind == JsonValueKind.Object
-                    ? resUsage
-                    : _lastStepUsage;
-                if (usageEl is { } u)
-                    finalItems.Add(new UsageContent(usageBaseline.ComputeDelta(u)));
+                if (result.TryGetProperty("usage", out var resUsage)
+                    && resUsage.ValueKind == JsonValueKind.Object
+                    && usageBaseline.ConsumeResult(resUsage) is { } fallbackUsage)
+                {
+                    finalItems.Add(new UsageContent(fallbackUsage));
+                }
 
                 FinalResult = true;
                 yield return CreateUpdate(finalItems, ChatFinishReason.Stop);
                 break;
         }
+    }
+
+    private UsageDetails? TryReadStepUsage(JsonElement step)
+    {
+        if (!step.TryGetProperty("usage", out var stepUsage) || stepUsage.ValueKind != JsonValueKind.Object)
+            return null;
+
+        var state = step.TryGetProperty("state", out var stateProp) && stateProp.ValueKind == JsonValueKind.String
+            ? stateProp.GetString()
+            : null;
+        if (!string.IsNullOrWhiteSpace(state) && !string.Equals(state, "DONE", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        if (step.TryGetProperty("step_index", out var idxProp) && idxProp.ValueKind == JsonValueKind.Number && idxProp.TryGetInt32(out var stepIndex))
+        {
+            if (!_emittedUsageSteps.Add(stepIndex))
+                return null;
+        }
+
+        return AntigravityUsageBaseline.ParseStepUsage(stepUsage);
     }
 
     private void ValidateToolStep(JsonElement step)

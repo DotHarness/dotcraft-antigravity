@@ -25,6 +25,8 @@ public sealed class BackendSamplingTests
         Assert.Equal(2, calls.Length);
         Assert.Equal(new[] { "Echo.One", "Echo-Two" }.Order(), calls.Select(c => c.Name).Order());
         Assert.Equal("Checking.", first.Text);
+        Assert.Equal(60, first.Usage!.InputTokenCount);
+        Assert.Equal(10, first.Usage.OutputTokenCount);
         Assert.Equal(0, invoked);
         var pid = Assert.Single(fixture.ChatPids);
         Assert.True(BackendFixture.IsAlive(pid));

@@ -99,12 +99,15 @@ public sealed class BackendAccountTests
         Assert.Equal(
             [ProviderReasoningEffort.Low, ProviderReasoningEffort.Medium, ProviderReasoningEffort.High, ProviderReasoningEffort.ExtraHigh],
             neon.Reasoning!.SupportedEfforts);
-        Assert.Equal(AntigravityModels.SafeDefaultContextWindow, neon.ContextWindow);
+        Assert.Equal(AntigravityModels.GeminiContextWindow, neon.ContextWindow);
 
         var sonnet = result.Models[2];
         Assert.Equal("Anthropic", sonnet.OwnedBy);
         Assert.Null(sonnet.Reasoning);
         Assert.Equal(AntigravityModels.ClaudeContextWindow, sonnet.ContextWindow);
+
+        var gptOss = result.Models[3];
+        Assert.Equal(AntigravityModels.GptOssContextWindow, gptOss.ContextWindow);
 
         var resolved = resolver.ResolveRuntime(fixture.Runtime with { Model = "claude-sonnet-4-6" });
         Assert.Equal(AntigravityModels.ClaudeContextWindow, resolved.ModelMetadata!.ContextWindow);
@@ -163,6 +166,18 @@ public sealed class BackendAccountTests
         Assert.Equal(TimeSpan.FromHours(5), snapshot.Primary.WindowDuration);
         Assert.Equal(58, snapshot.Secondary!.UsedPercent);
         Assert.Equal(TimeSpan.FromDays(7), snapshot.Secondary.WindowDuration);
+
+        var processCountAfterFirstRead = fixture.Files("started-*.json").Length;
+        await using var secondBackend = new AntigravityBackend(
+            new AntigravitySettings(BackendFixture.Executable),
+            Path.Combine(fixture.Root, "other-workspace"),
+            configDirectory: fixture.Root);
+        var secondProvider = secondBackend.CreateProvider(new ModelBackendContext(fixture.Runtime, new DummyStore(), default));
+        var cachedFromDisk = await Assert.IsAssignableFrom<IProviderUsageReader>(secondProvider).ReadAsync(default);
+
+        Assert.NotNull(cachedFromDisk);
+        Assert.Equal(snapshot.Primary.UsedPercent, cachedFromDisk!.Primary!.UsedPercent);
+        Assert.Equal(processCountAfterFirstRead, fixture.Files("started-*.json").Length);
     }
 
     [Fact]

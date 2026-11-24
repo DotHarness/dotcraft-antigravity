@@ -386,9 +386,16 @@ while (true)
             {
                 conversation_id = conversationId,
                 step_index = 1,
-                state = "ACTIVE",
+                state = "DONE",
                 step_type = "agent_response",
-                text_delta = "Checking."
+                text_delta = "Checking.",
+                usage = new
+                {
+                    input_tokens = 60,
+                    output_tokens = 10,
+                    cache_read_tokens = 0,
+                    total_tokens = 70
+                }
             }
         });
 
@@ -434,9 +441,13 @@ while (true)
 
 void EmitSuccess(string response)
 {
-    cumulativeInput += turnNumber == 1 ? 100 : 25;
-    cumulativeOutput += 15;
-    cumulativeCache += turnNumber == 1 ? 0 : 90;
+    var stepInput = turnNumber == 1 ? 100 : 25;
+    var stepOutput = 15;
+    var stepCache = turnNumber == 1 ? 0 : 90;
+    cumulativeInput += stepInput;
+    cumulativeOutput += stepOutput;
+    cumulativeCache += stepCache;
+    var stepTotal = stepInput + stepOutput;
     var total = cumulativeInput + cumulativeOutput;
 
     Emit(new
@@ -445,16 +456,35 @@ void EmitSuccess(string response)
         step_update = new
         {
             conversation_id = conversationId,
-            step_index = turnNumber * 2,
+            step_index = turnNumber * 10,
             state = "DONE",
             step_type = "agent_response",
             text_delta = response,
             usage = new
             {
-                input_tokens = cumulativeInput,
-                output_tokens = cumulativeOutput,
-                cache_read_tokens = cumulativeCache,
-                total_tokens = total
+                input_tokens = stepInput,
+                output_tokens = stepOutput,
+                cache_read_tokens = stepCache,
+                total_tokens = stepTotal
+            }
+        }
+    });
+
+    Emit(new
+    {
+        @event = "step_update",
+        step_update = new
+        {
+            conversation_id = conversationId,
+            step_index = turnNumber * 10 + 1,
+            state = "DONE",
+            step_type = "checkpoint",
+            usage = new
+            {
+                input_tokens = 12,
+                output_tokens = 3,
+                cache_read_tokens = 0,
+                total_tokens = 15
             }
         }
     });

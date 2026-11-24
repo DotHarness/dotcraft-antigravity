@@ -57,8 +57,8 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
         _clock = clock ?? TimeProvider.System;
         _toolBatchWindow = toolBatchWindow ?? AntigravityRun.DefaultToolBatchWindow;
         _limits = new AntigravityLimits(_clock);
-        _usage = new AntigravityUsage(settings, root, _limits, _clock, configDirectory);
         _stopping = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+        _usage = new AntigravityUsage(settings, root, _limits, _stopping.Token, _clock, configDirectory);
 
         Directory.CreateDirectory(root);
         PrivateDirectory.SweepStale(root, "run-");

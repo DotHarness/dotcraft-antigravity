@@ -32,6 +32,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
     private Channel<ChatResponseUpdate> _output = NewChannel();
     private readonly List<AIContent> _turnContents = [];
     private readonly List<FunctionCallContent> _stagedCalls = [];
+    private readonly List<UsageContent> _deferredUsage = [];
     private string[] _awaitingCallIds = [];
     private JsonArray? _expected;
     private string _isolatedHome = string.Empty;
@@ -203,6 +204,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
                 _turnContents.Clear();
                 _output = NewChannel();
                 _decoder = new(request.Tools, _allowedMediaPaths, _usageBaseline, _limits, request.ModelSlug);
+                FlushDeferredUsageLocked();
             }
 
             StartTurnWatchdog();
@@ -234,6 +236,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
             _expected = null;
             _awaitingCallIds = [];
             _stagedCalls.Clear();
+            _deferredUsage.Clear();
             _turnContents.Clear();
             _output = NewChannel();
             _decoder = new(request.Tools, _allowedMediaPaths, _usageBaseline, _limits, request.ModelSlug);
@@ -276,6 +279,21 @@ internal sealed class AntigravityRun : IAsyncDisposable
             _toolBatchTimer?.Dispose();
             _toolBatchTimer = new Timer(_ => FlushStagedToolCalls(), null, _toolBatchWindow, Timeout.InfiniteTimeSpan);
         }
+    }
+
+    private void FlushDeferredUsageLocked()
+    {
+        if (_deferredUsage.Count == 0)
+            return;
+
+        var items = _deferredUsage.Cast<AIContent>().ToList();
+        _deferredUsage.Clear();
+        _output.Writer.TryWrite(new ChatResponseUpdate(ChatRole.Assistant, items)
+        {
+            ResponseId = ConversationId,
+            MessageId = ConversationId,
+            ModelId = _request.ModelSlug
+        });
     }
 
     private void FlushStagedToolCalls()
@@ -363,7 +381,13 @@ internal sealed class AntigravityRun : IAsyncDisposable
                             {
                                 if (content is TextContent tc) _turnContents.Add(tc);
                             }
-                            output.Writer.TryWrite(update);
+                            if (!output.Writer.TryWrite(update))
+                            {
+                                foreach (var content in update.Contents)
+                                {
+                                    if (content is UsageContent uc) _deferredUsage.Add(uc);
+                                }
+                            }
                         }
                     }
 

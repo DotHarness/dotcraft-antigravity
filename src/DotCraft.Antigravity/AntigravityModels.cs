@@ -6,9 +6,9 @@ namespace DotCraft.Antigravity;
 
 internal sealed partial class AntigravityModels
 {
-    public const int SafeDefaultContextWindow = 239_000;
-    public const int ClaudeContextWindow = 200_000;
-    public const int GptOssContextWindow = 128_000;
+    public const int GeminiContextWindow = 1_048_576;
+    public const int ClaudeContextWindow = 1_000_000;
+    public const int GptOssContextWindow = 131_072;
 
     private static readonly (string Suffix, ProviderReasoningEffort Effort, string Token)[] EffortSuffixes =
     [
@@ -206,7 +206,7 @@ internal sealed partial class AntigravityModels
         var lower = baseId.ToLowerInvariant();
         var isClaude = lower.StartsWith("claude-", StringComparison.Ordinal);
         var isGptOss = lower.StartsWith("gpt-oss", StringComparison.Ordinal);
-        var contextWindow = isGptOss ? GptOssContextWindow : isClaude ? ClaudeContextWindow : SafeDefaultContextWindow;
+        var contextWindow = isGptOss ? GptOssContextWindow : isClaude ? ClaudeContextWindow : GeminiContextWindow;
         var ownedBy = isClaude ? "Anthropic" : isGptOss ? "OpenAI" : "Google";
         string[] modalities = isGptOss ? new[] { "text" } : new[] { "text", "image" };
 

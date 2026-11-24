@@ -9,10 +9,12 @@ internal sealed class AntigravityUsage(
     AntigravitySettings settings,
     string root,
     AntigravityLimits limits,
+    CancellationToken stopping = default,
     TimeProvider? clock = null,
     string? configDirectory = null)
 {
     private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan StaleMaxAge = TimeSpan.FromMinutes(30);
     private static readonly TimeSpan QueryTimeout = TimeSpan.FromSeconds(15);
 
     private static readonly Dictionary<string, string> CanonicalGroupPrefixes = new(StringComparer.OrdinalIgnoreCase)
@@ -26,8 +28,10 @@ internal sealed class AntigravityUsage(
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
     private readonly object _cacheGate = new();
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
+    private readonly string _diskCachePath = ResolveDiskCachePath(root, configDirectory);
     private ProviderUsageSnapshot? _cached;
     private DateTimeOffset _cachedAt = DateTimeOffset.MinValue;
+    private int _backgroundRefreshRunning;
 
     public void ClearCache()
     {
@@ -35,6 +39,14 @@ internal sealed class AntigravityUsage(
         {
             _cached = null;
             _cachedAt = DateTimeOffset.MinValue;
+        }
+        try
+        {
+            if (File.Exists(_diskCachePath))
+                File.Delete(_diskCachePath);
+        }
+        catch
+        {
         }
     }
 
@@ -45,12 +57,71 @@ internal sealed class AntigravityUsage(
         if (limitReachedKind is not null)
             return BuildBlockedSnapshot(now, limitReachedKind, blockedUntil, validationUrl);
 
+        ProviderUsageSnapshot? cached;
+        DateTimeOffset cachedAt;
         lock (_cacheGate)
         {
-            if (_cached is not null && now - _cachedAt < CacheTtl)
-                return _cached;
+            cached = _cached;
+            cachedAt = _cachedAt;
         }
 
+        if (cached is null || now - cachedAt >= CacheTtl)
+        {
+            if (TryLoadDiskCache() is { } disk && disk.CachedAt > cachedAt)
+            {
+                lock (_cacheGate)
+                {
+                    if (disk.CachedAt > _cachedAt)
+                    {
+                        _cached = disk.Snapshot;
+                        _cachedAt = disk.CachedAt;
+                    }
+                    cached = _cached;
+                    cachedAt = _cachedAt;
+                }
+            }
+        }
+
+        if (cached is not null)
+        {
+            var age = now - cachedAt;
+            if (age < CacheTtl)
+                return cached;
+            if (age < StaleMaxAge)
+            {
+                TriggerBackgroundRefresh();
+                return cached;
+            }
+        }
+
+        return await RefreshCoreAsync(ct);
+    }
+
+    private void TriggerBackgroundRefresh()
+    {
+        if (stopping.IsCancellationRequested)
+            return;
+        if (Interlocked.CompareExchange(ref _backgroundRefreshRunning, 1, 0) != 0)
+            return;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await RefreshCoreAsync(stopping);
+            }
+            catch
+            {
+            }
+            finally
+            {
+                Volatile.Write(ref _backgroundRefreshRunning, 0);
+            }
+        }, CancellationToken.None);
+    }
+
+    private async Task<ProviderUsageSnapshot?> RefreshCoreAsync(CancellationToken ct)
+    {
         var entryTime = _clock.GetUtcNow();
         await _refreshGate.WaitAsync(ct);
         try
@@ -62,16 +133,21 @@ internal sealed class AntigravityUsage(
             }
 
             var fetched = await QueryCliUsageAsync(ct);
+            if (fetched is null)
+            {
+                lock (_cacheGate) return _cached;
+            }
+
+            var observedAt = _clock.GetUtcNow();
+            ProviderUsageSnapshot updated;
             lock (_cacheGate)
             {
-                if (fetched is not null)
-                {
-                    _cached = fetched;
-                    _cachedAt = _clock.GetUtcNow();
-                    return fetched;
-                }
-                return _cached;
+                _cached = fetched.Value.Snapshot;
+                _cachedAt = observedAt;
+                updated = _cached;
             }
+            TrySaveDiskCache(fetched.Value.RawJson, observedAt);
+            return updated;
         }
         finally
         {
@@ -79,7 +155,7 @@ internal sealed class AntigravityUsage(
         }
     }
 
-    private async Task<ProviderUsageSnapshot?> QueryCliUsageAsync(CancellationToken ct)
+    private async Task<(ProviderUsageSnapshot Snapshot, string RawJson)?> QueryCliUsageAsync(CancellationToken ct)
     {
         var (executable, found) = AntigravityEnvironment.ResolveExecutable(settings.ExecutablePath);
         if (!found) return null;
@@ -103,12 +179,69 @@ internal sealed class AntigravityUsage(
             var (exitCode, stdout, _) = await process.ReadToExitAsync(timeout.Token);
             if (exitCode != 0 || string.IsNullOrWhiteSpace(stdout))
                 return null;
-            return ParseUsageJson(stdout, _clock.GetUtcNow());
+            var snapshot = ParseUsageJson(stdout, _clock.GetUtcNow());
+            return snapshot is null ? null : (snapshot, stdout);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             return null;
         }
+    }
+
+    private (ProviderUsageSnapshot Snapshot, DateTimeOffset CachedAt)? TryLoadDiskCache()
+    {
+        try
+        {
+            if (!File.Exists(_diskCachePath))
+                return null;
+            using var doc = JsonDocument.Parse(File.ReadAllText(_diskCachePath, Encoding.UTF8));
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                return null;
+            var cachedAtRaw = ReadString(doc.RootElement, "cachedAt");
+            var rawJson = ReadString(doc.RootElement, "rawJson");
+            if (string.IsNullOrWhiteSpace(cachedAtRaw) || string.IsNullOrWhiteSpace(rawJson))
+                return null;
+            if (!DateTimeOffset.TryParse(cachedAtRaw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var cachedAt))
+                return null;
+            var snapshot = ParseUsageJson(rawJson, cachedAt);
+            return snapshot is null ? null : (snapshot, cachedAt);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private void TrySaveDiskCache(string rawJson, DateTimeOffset cachedAt)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(_diskCachePath);
+            if (!string.IsNullOrWhiteSpace(dir))
+                Directory.CreateDirectory(dir);
+            var payload = JsonSerializer.Serialize(new
+            {
+                cachedAt = cachedAt.ToString("O", CultureInfo.InvariantCulture),
+                rawJson
+            });
+            var tempPath = _diskCachePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            File.WriteAllText(tempPath, payload, Encoding.UTF8);
+            File.Move(tempPath, _diskCachePath, overwrite: true);
+        }
+        catch
+        {
+        }
+    }
+
+    private static string ResolveDiskCachePath(string root, string? configDirectory)
+    {
+        if (!string.IsNullOrWhiteSpace(configDirectory))
+            return Path.Combine(configDirectory, "usage-cache.json");
+
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        return string.IsNullOrWhiteSpace(home)
+            ? Path.Combine(root, "usage-cache.json")
+            : Path.Combine(home, ".craft", "cache", "antigravity-usage.json");
     }
 
     private ProviderUsageSnapshot BuildBlockedSnapshot(
