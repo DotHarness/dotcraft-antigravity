@@ -21,6 +21,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
     private readonly HashSet<string> _allowedMediaPaths;
 
     private PrivateDirectory? _directory;
+    private readonly AntigravitySteer? _steer;
     private AntigravityMcpServer? _mcp;
     private AntigravityProcess? _process;
     private Task? _reader;
@@ -70,6 +71,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
         _request = request;
         _stopping = CancellationTokenSource.CreateLinkedTokenSource(stopping);
         _directory = existingDirectory ?? PrivateDirectory.CreateRun(root);
+        _steer = request.Tools.Count > 0 ? new AntigravitySteer(_directory) : null;
         _allowedMediaPaths = new HashSet<string>(existingMediaPaths ?? [], StringComparer.OrdinalIgnoreCase);
         _decoder = new(request.Tools, _allowedMediaPaths, _usageBaseline, _limits, request.ModelSlug);
     }
@@ -100,7 +102,8 @@ internal sealed class AntigravityRun : IAsyncDisposable
             _settings.AllowAiCredits,
             _allowedMediaPaths,
             ct,
-            _configDirectory);
+            _configDirectory,
+            enableJsonHooks: _steer is not null);
 
         var work = directory.EnsureSubdirectory("work");
         await directory.WriteAsync(
@@ -108,8 +111,9 @@ internal sealed class AntigravityRun : IAsyncDisposable
             _request.BuildRelayAgentMarkdown(),
             ct);
 
-        if (_request.Tools.Count > 0)
+        if (_steer is not null)
         {
+            await _steer.InstallAsync(ct);
             _mcp = new AntigravityMcpServer(_request.Tools, OnToolCallReceived, _stopping.Token);
             await _mcp.StartAsync(ct);
             await directory.WriteAsync(
@@ -143,6 +147,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
         }
 
         var env = AntigravityEnvironment.BuildChildEnvironment(_isolatedHome, explicitConfigDir: _configDirectory);
+        env.Remove("ANTIGRAVITY_CONFIG_DIR");
         _process = new AntigravityProcess(executable, work, args, env, pidFileDirectory: directory.Path);
         StartTurnWatchdog();
         _reader = ReadLoopAsync();
@@ -174,17 +179,19 @@ internal sealed class AntigravityRun : IAsyncDisposable
 
         if (awaitingTools)
         {
-            if (_mcp is null
-                || added.Length != _awaitingCallIds.Length
-                || !added.All(n => n?["role"]?.GetValue<string>() == "tool" && n["content"]?["CallId"] is not null))
+            var callCount = _awaitingCallIds.Length;
+            if (_mcp is null || added.Length < callCount
+                || !added.Take(callCount).All(n => n?["role"]?.GetValue<string>() == "tool" && n["content"]?["CallId"] is not null)
+                || !request.TryBuildToolGuidance(added.AsSpan(callCount), out var guidance))
             {
                 return ResumeOutcome.Incompatible;
             }
 
             var results = request.Messages
+                .Where(m => m.Role == ChatRole.Tool)
                 .SelectMany(m => m.Contents)
                 .OfType<FunctionResultContent>()
-                .TakeLast(_awaitingCallIds.Length)
+                .TakeLast(callCount)
                 .ToArray();
 
             var expectedIds = _awaitingCallIds.ToHashSet(StringComparer.Ordinal);
@@ -205,6 +212,8 @@ internal sealed class AntigravityRun : IAsyncDisposable
                 FlushDeferredUsageLocked();
             }
 
+            if (guidance is not null)
+                await _steer!.PublishAsync(guidance, ct);
             StartTurnWatchdog();
             foreach (var result in results)
                 _mcp.Complete(result.CallId, result.Result, result.Exception is not null);
@@ -222,7 +231,8 @@ internal sealed class AntigravityRun : IAsyncDisposable
         {
             foreach (var path in newMedia)
                 _allowedMediaPaths.Add(path);
-            await AntigravityEnvironment.WriteSettingsAsync(directory, _settings.AllowAiCredits, _allowedMediaPaths, ct);
+            await AntigravityEnvironment.WriteSettingsAsync(directory, _settings.AllowAiCredits, _allowedMediaPaths, ct,
+                enableJsonHooks: _steer is not null);
             return ResumeOutcome.NeedsConversationRespawn;
         }
 
@@ -255,6 +265,8 @@ internal sealed class AntigravityRun : IAsyncDisposable
             return ResumeOutcome.Incompatible;
         }
     }
+
+    public void VerifySteerDelivered() => _steer?.VerifyDelivered();
 
     public void Release(DateTimeOffset now)
     {

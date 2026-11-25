@@ -76,7 +76,7 @@ internal sealed class AntigravityRequest
             mainAgent: true
             subagent: false
             excludeDefaultComponents: true
-            inheritCustomizations: false
+            inheritCustomizations: {(Tools.Count > 0 ? "true" : "false")}
             tools: []
             ---
 
@@ -191,6 +191,24 @@ internal sealed class AntigravityRequest
 
         if (parts.Count == 0) return null;
         return (AntigravityJson.UserMessage(string.Join("\n\n", parts)), mediaPaths);
+    }
+
+    public bool TryBuildToolGuidance(ReadOnlySpan<JsonNode?> trailing, out JsonArray? guidance)
+    {
+        guidance = null;
+        if (trailing.IsEmpty)
+            return true;
+
+        foreach (var atom in trailing)
+        {
+            if (atom?["role"]?.GetValue<string>() != "user" || atom["content"]?["text"] is not JsonValue)
+                return false;
+        }
+
+        var messages = Messages.Reverse().TakeWhile(message => message.Role == ChatRole.User).Reverse();
+        guidance = new JsonArray(messages.SelectMany(message => message.Contents.OfType<TextContent>())
+            .Select(content => (JsonNode?)new JsonObject { ["userMessage"] = content.Text }).ToArray());
+        return true;
     }
 
     public JsonNode?[]? After(JsonArray expected)

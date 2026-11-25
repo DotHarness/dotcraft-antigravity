@@ -69,6 +69,7 @@ public sealed class AntigravityPluginHostTests
 
             var clients = host.Services.GetRequiredService<ChatClientRegistry>();
             var client = clients.GetChatClient(config, "ag", "gemini-4-neon");
+            Assert.Equal(ModelSteeringMode.AtNextBoundary, client.GetService<ModelSteeringPolicy>()?.Mode);
             using var scope = BackendFixture.Conversation();
             var result = await client.GetResponseAsync([new(ChatRole.User, "parallel")], BackendSamplingTests.Options())
                 .WaitAsync(TimeSpan.FromSeconds(15));

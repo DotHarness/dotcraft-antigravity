@@ -222,6 +222,7 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
 
                 if (!fallbackToCold)
                 {
+                    run.VerifySteerDelivered();
                     completed = true;
                     _limits.ClearOnSuccess();
                     yield break;
@@ -490,6 +491,8 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
         CancellationToken stopping,
         AntigravityAccount account) : IChatClient
     {
+        private static readonly ModelSteeringPolicy SteeringPolicy = new(ModelSteeringMode.AtNextBoundary);
+
         public Task<ChatResponse> GetResponseAsync(
             IEnumerable<ChatMessage> messages,
             ChatOptions? options = null,
@@ -508,8 +511,16 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
                 yield return update;
         }
 
-        public object? GetService(Type serviceType, object? serviceKey = null) =>
-            serviceKey is null && serviceType.IsInstanceOfType(this) ? this : null;
+        public object? GetService(Type serviceType, object? serviceKey = null)
+        {
+            if (serviceKey is not null)
+                return null;
+
+            if (serviceType == typeof(ModelSteeringPolicy))
+                return SteeringPolicy;
+
+            return serviceType.IsInstanceOfType(this) ? this : null;
+        }
 
         public void Dispose() { }
     }

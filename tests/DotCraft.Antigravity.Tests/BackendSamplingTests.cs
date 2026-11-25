@@ -168,7 +168,6 @@ public sealed class BackendSamplingTests
             var capture = fixture.Capture;
             var agentMd = capture.GetProperty("agentMarkdown").GetString()!;
             Assert.Contains("excludeDefaultComponents: true", agentMd);
-            Assert.Contains("inheritCustomizations: false", agentMd);
             Assert.Contains("tools: []", agentMd);
             Assert.Contains("dotcraft instructions", agentMd);
             Assert.Contains("workspace instructions", agentMd);

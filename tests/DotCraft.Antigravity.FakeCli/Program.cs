@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -411,6 +412,11 @@ while (true)
     }
     else if (text.Contains("parallel", StringComparison.Ordinal) && !text.Contains("\"Result\"", StringComparison.Ordinal) && mcp is not null && listed.Count >= 2)
     {
+        var captureSteering = text.Contains("capture-native-steer", StringComparison.Ordinal);
+        var runHook = captureSteering && !text.Contains("skip-preinvocation", StringComparison.Ordinal);
+        var invocations = new List<string[]>();
+        if (runHook) invocations.Add(await InvokePreInvocationAsync());
+
         Emit(new
         {
             @event = "step_update",
@@ -456,10 +462,28 @@ while (true)
             }
         });
 
+        if (runHook) invocations.Add(await InvokePreInvocationAsync());
+
+        var returned = results.ToList();
         if (text.Contains("two-rounds", StringComparison.Ordinal))
         {
             var third = await mcp.CallToolAsync(listed[0].Name, new Dictionary<string, object?> { ["value"] = "third" });
             reply += "|" + third.Content.OfType<TextContentBlock>().First().Text;
+            returned.Add(third);
+            if (runHook) invocations.Add(await InvokePreInvocationAsync());
+        }
+
+        if (captureSteering)
+        {
+            var captured = returned.Select(result => new
+            {
+                text = result.Content.OfType<TextContentBlock>().Select(block => block.Text).ToArray(),
+                images = result.Content.OfType<ImageContentBlock>()
+                    .Select(image => new { image.MimeType, bytes = image.DecodedData.ToArray() }).ToArray(),
+                result.IsError
+            });
+            await File.WriteAllTextAsync(Path.Combine(root, $"mcp-results-{pid}.json"), JsonSerializer.Serialize(captured));
+            await File.WriteAllTextAsync(Path.Combine(root, $"steer-{pid}.json"), JsonSerializer.Serialize(invocations));
         }
 
         EmitSuccess(reply);
@@ -471,6 +495,45 @@ while (true)
 
     line = await Console.In.ReadLineAsync();
     if (line is null) return 0;
+}
+
+async Task<string[]> InvokePreInvocationAsync()
+{
+    var manifestPath = Path.Combine(home, ".gemini", "config", "hooks.json");
+    using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(manifestPath));
+    var handler = manifest.RootElement.EnumerateObject().Single().Value
+        .GetProperty("PreInvocation").EnumerateArray().Single();
+    var command = handler.GetProperty("command").GetString()!;
+    var info = new ProcessStartInfo
+    {
+        FileName = OperatingSystem.IsWindows() ? "cmd.exe" : "/bin/sh",
+        RedirectStandardInput = true,
+        RedirectStandardOutput = true,
+        StandardOutputEncoding = Encoding.UTF8,
+        CreateNoWindow = true,
+        UseShellExecute = false
+    };
+    if (OperatingSystem.IsWindows())
+    {
+        info.Arguments = "/d /s /c \"" + command + "\"";
+    }
+    else
+    {
+        info.ArgumentList.Add("-c");
+        info.ArgumentList.Add(command);
+    }
+
+    using var shell = Process.Start(info)!;
+    shell.StandardInput.Close();
+    var stdout = await shell.StandardOutput.ReadToEndAsync();
+    await shell.WaitForExitAsync();
+    if (shell.ExitCode != 0)
+        throw new InvalidOperationException($"The PreInvocation hook exited with code {shell.ExitCode}.");
+    if (string.IsNullOrWhiteSpace(stdout)) return [];
+
+    using var output = JsonDocument.Parse(stdout);
+    if (!output.RootElement.TryGetProperty("injectSteps", out var steps)) return [];
+    return steps.EnumerateArray().Select(step => step.GetProperty("userMessage").GetString()!).ToArray();
 }
 
 void EmitSuccess(string response)
