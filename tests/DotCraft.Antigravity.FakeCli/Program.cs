@@ -191,7 +191,8 @@ await File.WriteAllTextAsync(
         leakedSecret = Environment.GetEnvironmentVariable("FAKE_HOST_API_KEY")
     }));
 
-if (resume is not null && File.Exists(Path.Combine(root, "fake-resume-fails")))
+var nativeSession = Path.Combine(geminiDir, "fake-native-session");
+if (resume is not null && (!File.Exists(nativeSession) || await File.ReadAllTextAsync(nativeSession) != resume))
 {
     Emit(new
     {
@@ -200,6 +201,11 @@ if (resume is not null && File.Exists(Path.Combine(root, "fake-resume-fails")))
     });
     return 1;
 }
+
+if (resume is null)
+    await File.WriteAllTextAsync(nativeSession, conversationId);
+else if (File.Exists(Path.Combine(root, "fake-resume-new-id")))
+    conversationId = $"conv-{pid}";
 
 McpClient? mcp = null;
 IList<McpClientTool> listed = [];

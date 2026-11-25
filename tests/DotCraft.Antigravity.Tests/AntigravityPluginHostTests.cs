@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Text.Json;
 using DotCraft.Agents;
 using DotCraft.Configuration;
@@ -81,6 +80,13 @@ public sealed class AntigravityPluginHostTests
             Assert.True(catalog.Success);
             Assert.Equal("gemini-4-neon", catalog.Models[0].Id);
 
+            using (BackendFixture.Conversation(thread: "completed"))
+            {
+                var complete = await client.GetResponseAsync([new(ChatRole.User, "hello")])
+                    .WaitAsync(TimeSpan.FromSeconds(15));
+                Assert.Equal(ChatFinishReason.Stop, complete.FinishReason);
+            }
+
             await runtime.SetEnabledAsync(id, false);
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             while (runtime.Snapshot.Plugins.Single(p => p.PluginId == id).State != DotNetExtensionRuntimeState.Stopped)
@@ -92,22 +98,13 @@ public sealed class AntigravityPluginHostTests
             }
             Assert.Equal(0, runtime.Snapshot.Plugins.Single(p => p.PluginId == id).LeakedGenerations);
 
-            var dataRoot = Path.Combine(userData, "plugins", id, "data");
-            if (Directory.Exists(dataRoot))
+            var dataRoot = AntigravitySessions.WorkspaceRoot(Path.Combine(userData, "plugin-data", id), workspace);
+            var saved = Assert.Single(Directory.GetDirectories(dataRoot, "run-*"));
+            Assert.True(File.Exists(Path.Combine(saved, AntigravitySessions.CheckpointFile)));
+            foreach (var file in Directory.GetFiles(dataRoot, "started-*.json"))
             {
-                Assert.Empty(Directory.GetDirectories(dataRoot, "run-*"));
-                foreach (var file in Directory.GetFiles(dataRoot, "started-*.json"))
-                {
-                    var pid = JsonSerializer.Deserialize<JsonElement>(File.ReadAllText(file)).GetProperty("pid").GetInt32();
-                    try
-                    {
-                        using var process = Process.GetProcessById(pid);
-                        Assert.True(process.HasExited);
-                    }
-                    catch (ArgumentException)
-                    {
-                    }
-                }
+                var pid = JsonSerializer.Deserialize<JsonElement>(File.ReadAllText(file)).GetProperty("pid").GetInt32();
+                Assert.False(BackendFixture.IsAlive(pid));
             }
         }
         finally

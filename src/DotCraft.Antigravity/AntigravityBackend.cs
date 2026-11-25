@@ -10,8 +10,6 @@ namespace DotCraft.Antigravity;
 internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, IAsyncDisposable
 {
     private const int MaxIdleRuns = 6;
-    private const int MaxShelvedSessions = 64;
-    private static readonly TimeSpan SessionCacheLifetime = TimeSpan.FromHours(1);
 
     private readonly AntigravitySettings _settings;
     private readonly string _root;
@@ -26,7 +24,8 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
     private readonly EventHandler _processExitHandler;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly Dictionary<string, AntigravityRun> _runs = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, Shelved> _shelf = new(StringComparer.Ordinal);
+    private readonly AntigravitySessions _sessions;
+    private DateTimeOffset _nextSessionSweep;
     private int _disposed;
 
     public IModelBackend Backend => this;
@@ -64,7 +63,7 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
         AppDomain.CurrentDomain.ProcessExit += _processExitHandler;
 
         Directory.CreateDirectory(root);
-        PrivateDirectory.SweepStale(root, "run-");
+        _sessions = new AntigravitySessions(root, _clock);
         PrivateDirectory.SweepStale(root, "usage-");
         PrivateDirectory.SweepStale(root, "probe-");
     }
@@ -75,7 +74,6 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
     {
         _limits.ThrowIfBlocked();
 
-        // Skip spawning an extra `agy models` probe when resuming an already-live worker mid-turn for tool results.
         var identity = ProviderRequestContextScope.Current?.CurrentIdentity;
         if (identity is not null)
         {
@@ -105,12 +103,11 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
     }
 
     private static string BuildRunKey(EffectiveModelRuntime runtime, ProviderConversationIdentity identity) =>
-        string.Join('\0',
-            runtime.ProviderId,
-            runtime.BackendGeneration,
-            identity.CurrentThreadId,
-            identity.ContextWindowId,
-            identity.RequestKind.ToString());
+        string.Join('\0', runtime.ProviderId, identity.CurrentThreadId, identity.ContextWindowId, identity.RequestKind.ToString());
+
+    private string BuildSessionKey(string runKey) =>
+        AntigravityRequest.Hash(string.Join('\0', runKey, _settings.ExecutablePath,
+            _configDirectory ?? Environment.GetEnvironmentVariable("ANTIGRAVITY_CONFIG_DIR")));
 
     internal async IAsyncEnumerable<ChatResponseUpdate> SampleAsync(
         AntigravityRequest request,
@@ -171,7 +168,8 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
                 }
                 else
                 {
-                    (run, resumedFromShelf) = await StartAsync(key, request, allowShelf: attempt == 0, token);
+                    (run, resumedFromShelf) = await StartAsync(key, request,
+                        allowShelf: attempt == 0 && identity?.RequestKind == ProviderRequestKind.Turn, token);
                 }
             }
             finally
@@ -237,7 +235,7 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
                     if (completed && identity is not null && run.IsWaiting &&
                         (run.AwaitingTools || identity.RequestKind == ProviderRequestKind.Turn))
                     {
-                        run.Release();
+                        run.Release(_clock.GetUtcNow());
                         var idle = _runs.Where(pair => !pair.Value.IsBusy).OrderBy(pair => pair.Value.LastUsed).ToArray();
                         foreach (var (idleKey, idleRun) in idle.Take(Math.Max(0, idle.Length - MaxIdleRuns)))
                         {
@@ -266,31 +264,38 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
         bool allowShelf,
         CancellationToken ct)
     {
-        if (allowShelf && _shelf.Remove(key, out var saved))
+        if (allowShelf && await _sessions.TakeAsync(BuildSessionKey(key)) is { } saved)
         {
-            if (saved.Fingerprint == request.Fingerprint
-                && request.After(saved.Expected) is { } added
-                && await request.BuildIncrementalUserInputAsync(added, saved.Directory, ct) is { } incremental)
+            var (directory, checkpoint) = saved;
+            var attached = false;
+            try
             {
-                var resumedRun = new AntigravityRun(
-                    _settings,
-                    _root,
-                    _limits,
-                    request,
-                    Stopping,
-                    existingDirectory: saved.Directory,
-                    resumeConversationId: saved.ConversationId,
-                    existingMediaPaths: saved.MediaPaths.Concat(incremental.MediaPaths),
-                    configDirectory: _configDirectory,
-                    toolBatchWindow: _toolBatchWindow);
+                var media = checkpoint.MediaFiles.Select(file => Path.Combine(directory.Path, "media", file)).ToArray();
+                if (request.After(checkpoint) is { } added && media.All(File.Exists)
+                    && await request.BuildIncrementalUserInputAsync(added, directory, ct) is { } incremental)
+                {
+                    var resumedRun = new AntigravityRun(
+                        _settings,
+                        _root,
+                        _limits,
+                        request,
+                        Stopping,
+                        existingDirectory: directory,
+                        resumeConversationId: checkpoint.ConversationId,
+                        existingMediaPaths: media.Concat(incremental.MediaPaths),
+                        configDirectory: _configDirectory,
+                        toolBatchWindow: _toolBatchWindow);
 
-                var launched = await LaunchAsync(key, resumedRun, incremental.Payload, incremental.MediaPaths, ct);
-                if (launched is not null)
-                    return (launched, true);
+                    attached = true;
+                    var launched = await LaunchAsync(key, resumedRun, incremental.Payload, incremental.MediaPaths, ct);
+                    if (launched is not null)
+                        return (launched, true);
+                }
             }
-            else
+            finally
             {
-                await saved.Directory.DisposeAsync();
+                if (!attached)
+                    await directory.DisposeAsync();
             }
         }
 
@@ -335,33 +340,19 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
 
     private async Task RetireAsync(string key, AntigravityRun run, bool shelve)
     {
-        if (shelve && run.CanShelve)
+        if (shelve && run.GetCheckpoint() is { } checkpoint
+            && await run.DetachDirectoryForShelfAsync() is { } directory)
         {
-            var conversationId = run.ConversationId!;
-            var fingerprint = run.Fingerprint;
-            var expected = run.Expected!;
-            var mediaPaths = run.AllowedMediaPaths.ToArray();
-            var lastUsed = run.LastUsed;
-            var directory = await run.DetachDirectoryForShelfAsync();
-            if (directory is not null)
-            {
-                if (_shelf.Remove(key, out var previous))
-                    await previous.Directory.DisposeAsync();
-
-                _shelf[key] = new Shelved(directory, conversationId, fingerprint, expected, mediaPaths, lastUsed);
-                foreach (var (oldKey, old) in _shelf.OrderBy(pair => pair.Value.IdleSince).Take(Math.Max(0, _shelf.Count - MaxShelvedSessions)).ToArray())
-                {
-                    _shelf.Remove(oldKey);
-                    await old.Directory.DisposeAsync();
-                }
-                return;
-            }
+            await _sessions.SaveAsync(BuildSessionKey(key), directory, checkpoint);
+            await _sessions.PruneAsync();
         }
-
-        await run.DisposeAsync();
+        else
+        {
+            await run.DisposeAsync();
+        }
     }
 
-    internal async Task RetireIdleAsync(TimeSpan idleFor)
+    private async Task RetireIdleAsync(TimeSpan idleFor)
     {
         var now = _clock.GetUtcNow();
         foreach (var (key, run) in _runs.ToArray())
@@ -371,11 +362,10 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
             await RetireAsync(key, run, shelve: true);
         }
 
-        foreach (var (key, saved) in _shelf.ToArray())
+        if (now >= _nextSessionSweep)
         {
-            if (now - saved.IdleSince < SessionCacheLifetime) continue;
-            _shelf.Remove(key);
-            await saved.Directory.DisposeAsync();
+            await _sessions.PruneAsync();
+            _nextSessionSweep = now.AddHours(1);
         }
     }
 
@@ -391,6 +381,14 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, Stopping);
         try
         {
+            await _gate.WaitAsync(linked.Token);
+            try
+            {
+                await _sessions.PruneAsync(sweepOrphans: true);
+                _nextSessionSweep = _clock.GetUtcNow().AddHours(1);
+            }
+            finally { _gate.Release(); }
+
             using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
             while (await timer.WaitForNextTickAsync(linked.Token))
             {
@@ -404,22 +402,23 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
         }
         finally
         {
-            await StopRunsAsync();
+            await StopRunsAsync(preserveSessions: true);
         }
     }
 
-    internal async Task StopRunsAsync()
+    private Task StopRunsAsync() => StopRunsAsync(preserveSessions: false);
+
+    private async Task StopRunsAsync(bool preserveSessions)
     {
         await _gate.WaitAsync(CancellationToken.None);
         try
         {
             foreach (var (key, run) in _runs.ToArray())
-                await RetireAsync(key, run, shelve: false);
+                await RetireAsync(key, run, shelve: preserveSessions);
             _runs.Clear();
 
-            foreach (var saved in _shelf.Values.ToArray())
-                await saved.Directory.DisposeAsync();
-            _shelf.Clear();
+            if (!preserveSessions)
+                await _sessions.PruneAsync(clear: true);
         }
         finally
         {
@@ -432,18 +431,10 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         AppDomain.CurrentDomain.ProcessExit -= _processExitHandler;
         await _stopping.CancelAsync();
-        await StopRunsAsync();
+        await StopRunsAsync(preserveSessions: true);
         _stopping.Dispose();
         _gate.Dispose();
     }
-
-    private sealed record Shelved(
-        PrivateDirectory Directory,
-        string ConversationId,
-        string Fingerprint,
-        JsonArray Expected,
-        string[] MediaPaths,
-        DateTimeOffset IdleSince);
 
     private sealed class Provider(AntigravityBackend backend, CancellationToken stopping)
         : IModelProvider, IProviderModelRuntimeResolver, IModelCatalogProvider, IProviderAuthenticator, IProviderUsageReader

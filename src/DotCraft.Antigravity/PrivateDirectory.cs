@@ -7,12 +7,37 @@ namespace DotCraft.Antigravity;
 internal sealed class PrivateDirectory : IAsyncDisposable
 {
     private static readonly UTF8Encoding Utf8NoBom = new(encoderShouldEmitUTF8Identifier: false);
+    private const string RunLease = "run.lock";
+    private FileStream? _lease;
     private int _disposed;
 
     public string Path { get; }
 
-    public PrivateDirectory(string root, string prefix = "run-") =>
+    public PrivateDirectory(string root, string prefix) =>
         Path = Create(System.IO.Path.Combine(root, prefix + Guid.NewGuid().ToString("N")));
+
+    private PrivateDirectory(string path, FileStream lease) => (Path, _lease) = (path, lease);
+
+    public static PrivateDirectory CreateRun(string root)
+    {
+        var path = Create(System.IO.Path.Combine(root, "run-" + Guid.NewGuid().ToString("N")));
+        return new PrivateDirectory(path, File.Open(System.IO.Path.Combine(path, RunLease), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None));
+    }
+
+    public static PrivateDirectory? TryOpenRun(string path)
+    {
+        try
+        {
+            if (new DirectoryInfo(path).LinkTarget is not null) return null;
+            return new PrivateDirectory(path, File.Open(System.IO.Path.Combine(path, RunLease), FileMode.Open, FileAccess.ReadWrite, FileShare.None));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    public void ReleaseRun() => Interlocked.Exchange(ref _lease, null)?.Dispose();
 
     public static string Create(string path)
     {
@@ -89,6 +114,7 @@ internal sealed class PrivateDirectory : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        ReleaseRun();
         for (var attempt = 1; Directory.Exists(Path); attempt++)
         {
             if (TryDeleteTree(Path)) return;

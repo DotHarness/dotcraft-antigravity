@@ -101,7 +101,7 @@ public sealed class BackendSamplingTests
 
         var final = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
         Assert.Equal("A|B|C", final.Text);
-        Assert.Single(fixture.ChatPids);
+        var firstPid = Assert.Single(fixture.ChatPids);
 
         await fixture.Backend.RetireIdleNowAsync();
         history.AddRange(final.Messages);
@@ -109,7 +109,11 @@ public sealed class BackendSamplingTests
         var resumed = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
         var resumedCalls = resumed.Messages.SelectMany(m => m.Contents).OfType<FunctionCallContent>().ToArray();
 
-        Assert.Equal(2, fixture.ChatPids.Length);
+        var capture = Assert.Single(fixture.Files("capture-*.json"), c => c.GetProperty("pid").GetInt32() != firstPid);
+        var args = capture.GetProperty("args").EnumerateArray().Select(arg => arg.GetString()).ToArray();
+        Assert.Contains("--conversation", args);
+        Assert.Equal($"conv-{firstPid}", args[Array.IndexOf(args, "--conversation") + 1]);
+        Assert.Equal("parallel", capture.GetProperty("input").GetProperty("message").GetProperty("content").GetString());
         Assert.NotEmpty(resumedCalls);
         Assert.Empty(firstCalls.Append(thirdCall).Select(c => c.CallId).Intersect(resumedCalls.Select(c => c.CallId)));
     }
@@ -124,47 +128,6 @@ public sealed class BackendSamplingTests
         Assert.Equal("完成 ✓", response.Text);
         Assert.False(BackendFixture.IsAlive(Assert.Single(fixture.ChatPids)));
         Assert.Empty(Directory.GetDirectories(fixture.Root, "run-*"));
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task ShelvedConversationResumesByConversationIdOrFallsBackToColdStart(bool resumeFails)
-    {
-        await using var fixture = new BackendFixture();
-        using var scope = BackendFixture.Conversation();
-        var history = new List<ChatMessage> { new(ChatRole.User, "hello") };
-
-        var first = await fixture.Client.GetResponseAsync(history).WaitAsync(TimeSpan.FromSeconds(15));
-        var firstPid = Assert.Single(fixture.ChatPids);
-
-        await fixture.Backend.RetireIdleNowAsync();
-        Assert.False(BackendFixture.IsAlive(firstPid));
-
-        if (resumeFails)
-            await File.WriteAllTextAsync(Path.Combine(fixture.Root, "fake-resume-fails"), "");
-
-        history.AddRange(first.Messages);
-        history.Add(new(ChatRole.User, "next question"));
-
-        var next = await fixture.Client.GetResponseAsync(history).WaitAsync(TimeSpan.FromSeconds(15));
-        Assert.Equal("完成 ✓", next.Text);
-
-        var captures = fixture.Files("capture-*.json").OrderBy(c => c.GetProperty("pid").GetInt32() == firstPid ? 0 : 1).ToArray();
-        if (resumeFails)
-        {
-            Assert.Equal(3, captures.Length);
-            var coldFallback = captures.Single(c => !c.GetProperty("args").EnumerateArray().Any(a => a.GetString() == "--conversation") && c.GetProperty("pid").GetInt32() != firstPid);
-            Assert.Contains("Conversation history", coldFallback.GetProperty("input").GetRawText());
-        }
-        else
-        {
-            var resumed = captures.Single(c => c.GetProperty("pid").GetInt32() != firstPid);
-            var args = resumed.GetProperty("args").EnumerateArray().Select(a => a.GetString()).ToArray();
-            Assert.Equal($"conv-{firstPid}", args[Array.IndexOf(args, "--conversation") + 1]);
-            Assert.Contains("next question", resumed.GetProperty("input").GetRawText());
-            Assert.DoesNotContain("Conversation history", resumed.GetProperty("input").GetRawText());
-        }
     }
 
     [Fact]

@@ -10,13 +10,14 @@ namespace DotCraft.Antigravity.Tests;
 internal sealed class BackendFixture : IAsyncDisposable
 {
     public string Root { get; } = Path.Combine(Path.GetTempPath(), "dotcraft-agy-test-" + Guid.NewGuid().ToString("N"));
-    public AntigravityBackend Backend { get; }
-    public IModelProvider Provider { get; }
-    public IChatClient Client { get; }
-    public EffectiveModelRuntime Runtime { get; } = new("ag", "gemini-4-neon", "antigravity", "Antigravity", "", "", 30, null, new());
+    public AntigravityBackend Backend { get; private set; } = null!;
+    public IModelProvider Provider { get; private set; } = null!;
+    public IChatClient Client { get; private set; } = null!;
+    public EffectiveModelRuntime Runtime { get; private set; } = new("ag", "gemini-4-neon", "antigravity", "Antigravity", "", "", 30, null, new());
 
-    private readonly CancellationTokenSource _stopping = new();
-    private readonly Task _supervisor;
+    private readonly AntigravitySettings _settings;
+    private CancellationTokenSource _stopping = null!;
+    private Task _supervisor = null!;
 
     public static string Executable => Path.Combine(
         AppContext.BaseDirectory,
@@ -25,9 +26,16 @@ internal sealed class BackendFixture : IAsyncDisposable
 
     public BackendFixture(bool allowAiCredits = false, int idleTimeoutSeconds = 10, int requestTimeoutSeconds = 30)
     {
+        _settings = new AntigravitySettings(Executable, idleTimeoutSeconds, allowAiCredits, requestTimeoutSeconds);
+        Start();
+    }
+
+    private void Start()
+    {
+        _stopping = new();
         Directory.CreateDirectory(Root);
         Backend = new AntigravityBackend(
-            new AntigravitySettings(Executable, idleTimeoutSeconds, allowAiCredits, requestTimeoutSeconds),
+            _settings,
             Root,
             _stopping.Token,
             configDirectory: Root,
@@ -64,13 +72,25 @@ internal sealed class BackendFixture : IAsyncDisposable
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public async Task RestartAsync()
+    {
+        await StopAsync();
+        Runtime = Runtime with { BackendGeneration = Guid.NewGuid().ToString("N") };
+        Start();
+    }
+
+    private async Task StopAsync()
     {
         Client.Dispose();
         await _stopping.CancelAsync();
         await _supervisor.WaitAsync(TimeSpan.FromSeconds(10));
         await Backend.DisposeAsync();
         _stopping.Dispose();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await StopAsync();
         if (Directory.Exists(Root))
             Directory.Delete(Root, true);
     }

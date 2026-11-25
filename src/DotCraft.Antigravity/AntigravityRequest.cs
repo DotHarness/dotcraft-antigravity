@@ -147,7 +147,6 @@ internal sealed class AntigravityRequest
         if (added.Length == 0 || !added.All(n => n?["role"]?.GetValue<string>() == "user"))
             return null;
 
-        // Collect the trailing user messages whose atoms match the newly appended user content.
         var trailingUsers = new List<ChatMessage>();
         for (var i = Messages.Length - 1; i >= 0 && Messages[i].Role == ChatRole.User; i--)
             trailingUsers.Add(Messages[i]);
@@ -157,7 +156,6 @@ internal sealed class AntigravityRequest
             .Where(c => c is not UsageContent and not TextReasoningContent)
             .ToArray();
 
-        // Map from the end of trailing user contents to match newly appended text/media atoms accurately.
         var mediaPaths = new List<string>();
         var parts = new List<string>();
         var mediaQueue = new Queue<DataContent>(trailingAtoms.OfType<DataContent>().Where(AntigravityContent.IsSupportedMedia));
@@ -201,6 +199,30 @@ internal sealed class AntigravityRequest
         var prefix = new JsonArray(History.Take(expected.Count).Select(n => n?.DeepClone()).ToArray());
         return JsonNode.DeepEquals(expected, prefix) ? History.Skip(expected.Count).ToArray() : null;
     }
+
+    public JsonNode?[]? After(AntigravityCheckpoint checkpoint)
+    {
+        if (History.Count <= checkpoint.HistoryCount || Hash(Fingerprint) != checkpoint.Fingerprint)
+            return null;
+
+        return HistoryHash(History.Take(checkpoint.HistoryCount)) == checkpoint.HistoryHash
+            ? History.Skip(checkpoint.HistoryCount).ToArray()
+            : null;
+    }
+
+    internal static string Hash(string value) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+
+    internal static string HistoryHash(IEnumerable<JsonNode?> atoms) =>
+        Hash(new JsonArray(atoms.Select(Canonicalize).ToArray()).ToJsonString(AntigravityJson.Compact));
+
+    private static JsonNode? Canonicalize(JsonNode? node) => node switch
+    {
+        JsonObject obj => new JsonObject(obj.OrderBy(pair => pair.Key, StringComparer.Ordinal)
+            .Select(pair => KeyValuePair.Create(pair.Key, Canonicalize(pair.Value)))),
+        JsonArray array => new JsonArray(array.Select(Canonicalize).ToArray()),
+        _ => node?.DeepClone()
+    };
 
     public static JsonArray Snapshot(IEnumerable<ChatMessage> messages, bool reasoning = true)
     {

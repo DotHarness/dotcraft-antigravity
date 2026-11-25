@@ -10,7 +10,8 @@ public sealed class Plugin : IDotCraftPlugin
     {
         cancellationToken.ThrowIfCancellationRequested();
         var settings = AntigravitySettings.Read(context.Settings);
-        var backend = new AntigravityBackend(settings, context.DataRoot, context.Lifetime.Stopping);
+        var root = AntigravitySessions.WorkspaceRoot(context.DataRoot, context.WorkspaceRoot);
+        var backend = new AntigravityBackend(settings, root, context.Lifetime.Stopping);
         context.Lifetime.OwnAsync(backend);
         context.Lifetime.Run(backend.SuperviseAsync);
         context.Contributions.Add<IModelBackendSource>(backend);

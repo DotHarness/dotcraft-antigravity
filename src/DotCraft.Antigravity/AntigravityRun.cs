@@ -36,6 +36,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
     private readonly List<UsageContent> _deferredUsage = [];
     private string[] _awaitingCallIds = [];
     private JsonArray? _expected;
+    private JsonArray? _completedHistory;
     private string _isolatedHome = string.Empty;
     private string _isolatedGeminiDir = string.Empty;
     private int _busy = 1;
@@ -45,12 +46,8 @@ internal sealed class AntigravityRun : IAsyncDisposable
     public bool IsBusy => Volatile.Read(ref _busy) != 0;
     public bool IsWaiting => _expected is not null && !_stopping.IsCancellationRequested && _process is { HasExited: false };
     public bool AwaitingTools => _awaitingCallIds.Length > 0;
-    public bool CanShelve => IsWaiting && !AwaitingTools && !string.IsNullOrWhiteSpace(ConversationId);
     public ChannelReader<ChatResponseUpdate> Output => _output.Reader;
-    public string? ConversationId { get; private set; }
-    public string Fingerprint => _request.Fingerprint;
-    public JsonArray? Expected => _expected;
-    public IReadOnlySet<string> AllowedMediaPaths => _allowedMediaPaths;
+    private string? ConversationId { get; set; }
 
     public AntigravityRun(
         AntigravitySettings settings,
@@ -72,7 +69,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
         _toolBatchWindow = toolBatchWindow ?? DefaultToolBatchWindow;
         _request = request;
         _stopping = CancellationTokenSource.CreateLinkedTokenSource(stopping);
-        _directory = existingDirectory ?? new PrivateDirectory(root, "run-");
+        _directory = existingDirectory ?? PrivateDirectory.CreateRun(root);
         _allowedMediaPaths = new HashSet<string>(existingMediaPaths ?? [], StringComparer.OrdinalIgnoreCase);
         _decoder = new(request.Tools, _allowedMediaPaths, _usageBaseline, _limits, request.ModelSlug);
     }
@@ -235,6 +232,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
             Volatile.Write(ref _busy, 1);
             _request = request;
             _expected = null;
+            _completedHistory = null;
             _awaitingCallIds = [];
             _stagedCalls.Clear();
             _deferredUsage.Clear();
@@ -258,11 +256,18 @@ internal sealed class AntigravityRun : IAsyncDisposable
         }
     }
 
-    public void Release()
+    public void Release(DateTimeOffset now)
     {
-        LastUsed = DateTimeOffset.UtcNow;
+        lock (_state)
+            _completedHistory = AwaitingTools ? null : _expected;
+        LastUsed = now;
         Volatile.Write(ref _busy, 0);
     }
+
+    public AntigravityCheckpoint? GetCheckpoint() =>
+        !IsBusy && _completedHistory is { } history && ConversationId is { Length: > 0 } id
+            ? AntigravityCheckpoint.Capture(id, _request.Fingerprint, history, _allowedMediaPaths)
+            : null;
 
     public async Task<PrivateDirectory?> DetachDirectoryForShelfAsync()
     {
@@ -376,8 +381,12 @@ internal sealed class AntigravityRun : IAsyncDisposable
                         throw;
                     }
 
-                    if (!string.IsNullOrWhiteSpace(decoder.ConversationId))
-                        ConversationId = decoder.ConversationId;
+                    if (decoder.ConversationId is { } id)
+                    {
+                        if (_resumeConversationId is not null && id != _resumeConversationId)
+                            throw new InvalidDataException("Antigravity.ResumeMismatch: The CLI opened a different conversation.");
+                        ConversationId = id;
+                    }
 
                     if (decoder.SawProgressEvent)
                     {

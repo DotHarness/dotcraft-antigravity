@@ -2,9 +2,9 @@
 
 | Field | Value |
 |---|---|
-| Version | 0.3.0 |
+| Version | 0.4.0 |
 | Status | Living |
-| Date | 2026-11-24 |
+| Date | 2026-11-25 |
 
 ## Ownership
 
@@ -33,19 +33,23 @@ Each conversation run uses a private directory under the plugin's data root (`Pr
 
 Generation speed and first-token latency use Antigravity's own timing. The plugin reads generation metadata only from the run's isolated CLI session and reports timing only when it matches the usage for the same generation. A generation may include both a reply and tool calls. Its timing belongs with that generation's usage before the tool continuation, not with the next generation. Missing, ambiguous, or unreadable metadata does not affect the turn or its token counts. The host does not infer timing from CLI output arrival because `agy` can batch generated output.
 
-Retained runs are scoped to provider, backend generation, thread, context window and request kind. Continuation requires matching instructions, model, effort, tools, `allowAiCredits` and history prefix. Any changed request or history starts a fresh run from the complete DotCraft conversation. Compaction and non-turn requests end their run at the final result, and requests without conversation identity use isolated runs.
+Retained runs are scoped to provider, thread, context window and request kind. Continuation requires matching instructions, model, effort, tools, `allowAiCredits` and history prefix. Any changed request or history starts a fresh run from the complete DotCraft conversation. Compaction and non-turn requests end their run at the final result, and requests without conversation identity use isolated runs.
 
 ## Saved sessions
 
-Idle conversation runs remain live for `idleTimeoutSeconds` (default 900 seconds, up to 6 concurrent idle runs). On idle expiry or overflow, a run that finished at a non-tool boundary is shelved: its `agy` process exits while its isolated conversation directory stays on disk up to one hour (at most 64 shelved sessions). The next matching turn resumes it with `--conversation <id>` and sends only the new user input; if resume fails, the backend transparently falls back to a fresh cold run with full history in the same request. Every other retirement (unanswered tools, changed history, account change, sign-out or shutdown) deletes the isolated session directory immediately.
+Idle conversation runs remain live for `idleTimeoutSeconds` (default 900 seconds, up to 6 concurrent idle runs). On idle expiry, overflow or orderly host shutdown, a run that completed at a non-tool boundary is shelved. The worker and MCP endpoint stop, but the private CLI conversation is retained for up to seven days (at most 64 shelved sessions per workspace). Shelved sessions retain neither bridged credentials nor endpoint tokens.
+
+The next matching turn in the same workspace, provider, thread and context window resumes with `--conversation <id>` and sends only the new user input. This works across host restarts without relying on the host's process-local backend generation. The plugin checks both the sampling configuration and the full covered history prefix before resuming. A missing, changed or rejected session falls back to a fresh run with complete DotCraft history. Unfinished turns and unanswered tool calls are not saved. Authentication resets invalidate the workspace's saved sessions.
+
+Thread forks and subagents receive their DotCraft-provided history in independent CLI conversations. Antigravity's interactive `/fork` does not provide a headless interface for branching an identified source at the required boundary. The plugin never resumes a parent conversation on behalf of a child.
 
 ## Account, model discovery and runtime metadata
 
 - One `cli` authentication method (`Antigravity CLI account`) delegates credentials to `agy`.
 - Executable lookup honors `executablePath`, `ANTIGRAVITY_COMMAND` / `AGY_CLI_PATH` / `ANTIGRAVITY_CLI_PATH` and `PATH` before probing standard per-OS install locations, including `%LOCALAPPDATA%\agy\bin\agy.exe` on Windows.
-- `GetStatusAsync` verifies CLI presence (`Antigravity.CliNotFound`) and probes authentication via `agy models` (`Antigravity.LoginRequired` when unauthenticated), without ever reading credential contents. Authenticated status is cached with single-flight execution for 60 seconds and invalidated on login, logout or unauthorized sampling failures.
-- `LoginAsync` probes fresh CLI status and completes immediately when already signed in. Otherwise, it launches `agy acp --login` with `BROWSER=dotcraft-no-browser`, extracts the sign-in link from either `stdout` or `stderr` as an `auth_url` event, and races `manual_code` prompts against CLI exit so both copy-paste codes and browser localhost callbacks complete cleanly.
-- `LogoutAsync` stops retained runs, clears cached auth/catalog/usage/limit state, and invokes `agy -p "/logout" --output-format json`.
+- The authentication status check verifies CLI presence (`Antigravity.CliNotFound`) and probes authentication via `agy models` (`Antigravity.LoginRequired` when unauthenticated), without ever reading credential contents. Authenticated status is cached with single-flight execution for 60 seconds and invalidated on login, logout or unauthorized sampling failures.
+- Sign-in probes fresh CLI status and completes immediately when already signed in. Otherwise, it launches `agy acp --login` with `BROWSER=dotcraft-no-browser`, extracts the sign-in link from either `stdout` or `stderr` as an `auth_url` event, and races `manual_code` prompts against CLI exit so both copy-paste codes and browser localhost callbacks complete cleanly.
+- Sign-out stops retained runs, clears cached auth/catalog/usage/limit state, and invokes `agy -p "/logout" --output-format json`.
 - Model discovery parses `agy models`, grouping effort-suffixed slugs (`-low`, `-medium`, `-high`, `-xhigh`, `-max`) into one public model entry with `ModelReasoningSupport` while preserving exact CLI slugs per effort. `IProviderModelRuntimeResolver` projects model metadata, vision capability and context window bounds matching `agy` (`1_048_576` for Gemini/Orchestrator, `1_000_000` for Claude, `131_072` for GPT-OSS).
 
 ## Quota, early failure detection and usage
@@ -60,4 +64,4 @@ The Desktop module adds `composer.before` exclusively for providers with `backen
 
 ## Run lifetime
 
-Cancellation, abandoned streams, account changes, process exit and shutdown end active runs and release child process trees, loopback MCP listeners, pending tool calls and private run directories. On startup, stale run directories reap any recorded orphan `agy` worker process (matched by PID and process start timestamp) before directory removal.
+Cancellation, abandoned streams and account changes release child process trees, loopback MCP listeners, pending tool calls and unsaved private run directories. Startup reaps recorded orphan workers before removing unsaved directories. It leaves directories owned by another active backend untouched.

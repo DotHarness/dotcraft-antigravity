@@ -161,6 +161,12 @@ internal static partial class AntigravityEnvironment
             ct);
     }
 
+    public static void RemoveIsolatedTokens(string directory)
+    {
+        foreach (var name in TokenFilenames)
+            File.Delete(Path.Combine(directory, "home", ".gemini", "antigravity-cli", name));
+    }
+
     public static void SyncIsolatedToken(string isolatedHome, string? explicitConfigDir = null)
     {
         var realToken = ResolveRealTokenPath(explicitConfigDir);
