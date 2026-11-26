@@ -9,11 +9,14 @@ internal sealed record AntigravityCheckpoint(
     string Fingerprint,
     int HistoryCount,
     string HistoryHash,
-    string[] MediaFiles)
+    string[] MediaFiles,
+    bool HasHandoffFile = false)
 {
-    public static AntigravityCheckpoint Capture(string conversationId, string fingerprint, JsonArray history, IEnumerable<string> media) =>
+    public static AntigravityCheckpoint Capture(
+        string conversationId, string fingerprint, JsonArray history, IEnumerable<string> readPaths, string? handoffPath) =>
         new(conversationId, AntigravityRequest.Hash(fingerprint), history.Count, AntigravityRequest.HistoryHash(history),
-            media.Select(Path.GetFileName).OfType<string>().ToArray());
+            readPaths.Where(path => path != handoffPath).Select(Path.GetFileName).OfType<string>().ToArray(),
+            handoffPath is not null);
 }
 
 internal sealed class AntigravitySessions(string root, TimeProvider clock)

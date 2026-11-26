@@ -101,7 +101,7 @@ internal static partial class AntigravityEnvironment
     public static async Task<(string IsolatedHome, string IsolatedGeminiDir)> PrepareIsolatedHomeAsync(
         PrivateDirectory directory,
         bool allowAiCredits,
-        IEnumerable<string>? allowedMediaPaths,
+        IEnumerable<string>? allowedReadPaths,
         CancellationToken ct,
         string? explicitConfigDir = null,
         bool disableSlashCommands = true,
@@ -113,23 +113,23 @@ internal static partial class AntigravityEnvironment
         SyncIsolatedToken(isolatedHome, explicitConfigDir);
         LinkMacOsKeychains(isolatedHome, explicitConfigDir);
 
-        await WriteSettingsAsync(directory, allowAiCredits, allowedMediaPaths, ct, disableSlashCommands, enableJsonHooks);
+        await WriteSettingsAsync(directory, allowAiCredits, allowedReadPaths, ct, disableSlashCommands, enableJsonHooks);
         return (isolatedHome, isolatedGeminiDir);
     }
 
     public static async Task WriteSettingsAsync(
         PrivateDirectory directory,
         bool allowAiCredits,
-        IEnumerable<string>? allowedMediaPaths,
+        IEnumerable<string>? allowedReadPaths,
         CancellationToken ct,
         bool disableSlashCommands = true,
         bool enableJsonHooks = false)
     {
         var allow = new JsonArray { "mcp(dotcraft/*)" };
-        if (allowedMediaPaths is not null)
+        if (allowedReadPaths is not null)
         {
             var seen = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var path in allowedMediaPaths)
+            foreach (var path in allowedReadPaths)
             {
                 if (string.IsNullOrWhiteSpace(path) || !seen.Add(path)) continue;
                 allow.Add($"read_file({path})");

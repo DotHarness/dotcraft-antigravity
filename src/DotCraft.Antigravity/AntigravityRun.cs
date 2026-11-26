@@ -18,9 +18,10 @@ internal sealed class AntigravityRun : IAsyncDisposable
     private readonly CancellationTokenSource _stopping;
     private readonly object _state = new();
     private readonly AntigravityUsageBaseline _usageBaseline = new();
-    private readonly HashSet<string> _allowedMediaPaths;
+    private readonly HashSet<string> _allowedReadPaths;
 
     private PrivateDirectory? _directory;
+    private string? _handoffPath;
     private readonly AntigravitySteer? _steer;
     private AntigravityMcpServer? _mcp;
     private AntigravityProcess? _process;
@@ -59,6 +60,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
         PrivateDirectory? existingDirectory = null,
         string? resumeConversationId = null,
         IEnumerable<string>? existingMediaPaths = null,
+        string? existingHandoffPath = null,
         string? configDirectory = null,
         TimeSpan? toolBatchWindow = null)
     {
@@ -72,8 +74,10 @@ internal sealed class AntigravityRun : IAsyncDisposable
         _stopping = CancellationTokenSource.CreateLinkedTokenSource(stopping);
         _directory = existingDirectory ?? PrivateDirectory.CreateRun(root);
         _steer = request.Tools.Count > 0 ? new AntigravitySteer(_directory) : null;
-        _allowedMediaPaths = new HashSet<string>(existingMediaPaths ?? [], StringComparer.OrdinalIgnoreCase);
-        _decoder = new(request.Tools, _allowedMediaPaths, _usageBaseline, _limits, request.ModelSlug);
+        _allowedReadPaths = new HashSet<string>(existingMediaPaths ?? [],
+            OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        _handoffPath = existingHandoffPath;
+        _decoder = new(request.Tools, _allowedReadPaths, _usageBaseline, _limits, request.ModelSlug);
     }
 
     public async Task<bool> StartAsync(JsonObject? initialPayload, IEnumerable<string>? initialMediaPaths, CancellationToken ct)
@@ -86,21 +90,25 @@ internal sealed class AntigravityRun : IAsyncDisposable
         var payload = initialPayload;
         if (payload is null)
         {
-            var (cold, coldMedia) = await _request.BuildColdInputAsync(directory, ct);
+            var (cold, coldMedia, handoff) = await _request.BuildColdInputAsync(directory, ct);
             payload = cold;
             initialMediaPaths = coldMedia;
+            _handoffPath = handoff;
         }
+
+        if (_handoffPath is not null)
+            _allowedReadPaths.Add(_handoffPath);
 
         if (initialMediaPaths is not null)
         {
             foreach (var path in initialMediaPaths)
-                _allowedMediaPaths.Add(path);
+                _allowedReadPaths.Add(path);
         }
 
         (_isolatedHome, _isolatedGeminiDir) = await AntigravityEnvironment.PrepareIsolatedHomeAsync(
             directory,
             _settings.AllowAiCredits,
-            _allowedMediaPaths,
+            _allowedReadPaths,
             ct,
             _configDirectory,
             enableJsonHooks: _steer is not null);
@@ -108,7 +116,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
         var work = directory.EnsureSubdirectory("work");
         await directory.WriteAsync(
             Path.Combine("work", ".agents", "agents", AntigravityRequest.RelayAgentName, "agent.md"),
-            _request.BuildRelayAgentMarkdown(),
+            _request.BuildRelayAgentMarkdown(_handoffPath is not null),
             ct);
 
         if (_steer is not null)
@@ -210,7 +218,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
                 _stagedCalls.Clear();
                 _turnContents.Clear();
                 _output = NewChannel();
-                _decoder = new(request.Tools, _allowedMediaPaths, _usageBaseline, _limits, request.ModelSlug, resumedAfterToolCall: true);
+                _decoder = new(request.Tools, _allowedReadPaths, _usageBaseline, _limits, request.ModelSlug, resumedAfterToolCall: true);
                 FlushDeferredUsageLocked();
             }
 
@@ -228,12 +236,12 @@ internal sealed class AntigravityRun : IAsyncDisposable
         if (incremental is null) return ResumeOutcome.Incompatible;
 
         var (payload, newMedia) = incremental.Value;
-        var needsMediaRespawn = newMedia.Any(p => !_allowedMediaPaths.Contains(p));
+        var needsMediaRespawn = newMedia.Any(p => !_allowedReadPaths.Contains(p));
         if (needsMediaRespawn)
         {
             foreach (var path in newMedia)
-                _allowedMediaPaths.Add(path);
-            await AntigravityEnvironment.WriteSettingsAsync(directory, _settings.AllowAiCredits, _allowedMediaPaths, ct,
+                _allowedReadPaths.Add(path);
+            await AntigravityEnvironment.WriteSettingsAsync(directory, _settings.AllowAiCredits, _allowedReadPaths, ct,
                 enableJsonHooks: _steer is not null);
             return ResumeOutcome.NeedsConversationRespawn;
         }
@@ -250,7 +258,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
             _deferredUsage.Clear();
             _turnContents.Clear();
             _output = NewChannel();
-            _decoder = new(request.Tools, _allowedMediaPaths, _usageBaseline, _limits, request.ModelSlug);
+            _decoder = new(request.Tools, _allowedReadPaths, _usageBaseline, _limits, request.ModelSlug);
         }
 
         if (!string.IsNullOrEmpty(_isolatedHome))
@@ -280,7 +288,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
 
     public AntigravityCheckpoint? GetCheckpoint() =>
         !IsBusy && _completedHistory is { } history && ConversationId is { Length: > 0 } id
-            ? AntigravityCheckpoint.Capture(id, _request.ResumeFingerprint, history, _allowedMediaPaths)
+            ? AntigravityCheckpoint.Capture(id, _request.ResumeFingerprint, history, _allowedReadPaths, _handoffPath)
             : null;
 
     public async Task<PrivateDirectory?> DetachDirectoryForShelfAsync()

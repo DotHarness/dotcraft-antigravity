@@ -56,11 +56,13 @@ internal sealed class AntigravityRequest
             .ToJsonString(AntigravityJson.Compact);
     }
 
-    public string BuildRelayAgentMarkdown()
+    public string BuildRelayAgentMarkdown(bool hasHandoff)
     {
         var body = string.IsNullOrWhiteSpace(SystemPrompt)
             ? "You are a helpful assistant."
             : SystemPrompt;
+        if (hasHandoff)
+            body += "\n\nThe one exception to the built-in tool restriction is reading the explicitly provided conversation handoff file.";
 
         return $"""
             ---
@@ -69,15 +71,15 @@ internal sealed class AntigravityRequest
             mainAgent: true
             subagent: false
             excludeDefaultComponents: true
-            inheritCustomizations: {(Tools.Count > 0 ? "true" : "false")}
-            tools: []
+            inheritCustomizations: {(Tools.Count > 0 || hasHandoff ? "true" : "false")}
+            tools: {(hasHandoff ? "[view_file]" : "[]")}
             ---
 
             {body}
             """;
     }
 
-    public async Task<(JsonObject Payload, List<string> MediaPaths)> BuildColdInputAsync(
+    public async Task<(JsonObject Payload, List<string> MediaPaths, string? HandoffPath)> BuildColdInputAsync(
         PrivateDirectory directory,
         CancellationToken ct)
     {
@@ -90,10 +92,13 @@ internal sealed class AntigravityRequest
         var trailingUsers = conversation[trailingStart..];
         var mediaPaths = new List<string>();
         var sections = new List<string>();
+        string? handoffPath = null;
 
         if (prior.Length > 0)
         {
-            sections.Add("Conversation history (role-tagged JSON):\n" + Snapshot(prior).ToJsonString(AntigravityJson.Compact));
+            var handoff = await AntigravityHandoff.BuildAsync(prior, directory, ct);
+            sections.Add(handoff.Context);
+            handoffPath = handoff.File;
             var priorMediaRefs = new List<string>();
             foreach (var content in prior.SelectMany(m => m.Contents).SelectMany(AntigravityContent.Expand))
             {
@@ -129,7 +134,7 @@ internal sealed class AntigravityRequest
         }
 
         var prompt = sections.Count > 0 ? string.Join("\n\n", sections) : "Continue.";
-        return (AntigravityJson.UserMessage(prompt), mediaPaths);
+        return (AntigravityJson.UserMessage(prompt), mediaPaths, handoffPath);
     }
 
     public async Task<(JsonObject Payload, List<string> MediaPaths)?> BuildIncrementalUserInputAsync(

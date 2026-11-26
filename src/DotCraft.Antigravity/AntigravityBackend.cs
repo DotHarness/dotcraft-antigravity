@@ -273,7 +273,9 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
             try
             {
                 var media = checkpoint.MediaFiles.Select(file => Path.Combine(directory.Path, "media", file)).ToArray();
+                var handoff = checkpoint.HasHandoffFile ? Path.Combine(directory.Path, AntigravityHandoff.RelativePath) : null;
                 if (request.After(checkpoint) is { } added && media.All(File.Exists)
+                    && (handoff is null || File.Exists(handoff))
                     && await request.BuildIncrementalUserInputAsync(added, directory, ct) is { } incremental)
                 {
                     var resumedRun = new AntigravityRun(
@@ -285,6 +287,7 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
                         existingDirectory: directory,
                         resumeConversationId: checkpoint.ConversationId,
                         existingMediaPaths: media.Concat(incremental.MediaPaths),
+                        existingHandoffPath: handoff,
                         configDirectory: _configDirectory,
                         toolBatchWindow: _toolBatchWindow);
 

@@ -92,13 +92,13 @@ internal sealed class AntigravityUsageBaseline
 
 internal sealed class AntigravityStreamDecoder(
     AntigravityTools tools,
-    IReadOnlySet<string> allowedMediaPaths,
+    IReadOnlySet<string> allowedReadPaths,
     AntigravityUsageBaseline usageBaseline,
     AntigravityLimits limits,
     string modelId,
     bool resumedAfterToolCall = false)
 {
-    private static readonly HashSet<string> MediaTools = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly HashSet<string> FileReadTools = new(StringComparer.OrdinalIgnoreCase)
     {
         "read_file",
         "view_file"
@@ -273,7 +273,7 @@ internal sealed class AntigravityStreamDecoder(
         if (string.Equals(toolName, "call_mcp_tool", StringComparison.OrdinalIgnoreCase) && IsBridgedMcpCall(step))
             return;
 
-        if (!string.IsNullOrWhiteSpace(toolName) && MediaTools.Contains(toolName) && IsAuthorizedMediaRead(step))
+        if (!string.IsNullOrWhiteSpace(toolName) && FileReadTools.Contains(toolName) && IsAuthorizedFileRead(step))
             return;
 
         throw new NativeToolBlockedException(
@@ -311,38 +311,23 @@ internal sealed class AntigravityStreamDecoder(
             ? prop.GetString()?.Trim()
             : null;
 
-    private bool IsAuthorizedMediaRead(JsonElement step)
+    private bool IsAuthorizedFileRead(JsonElement step)
     {
-        if (allowedMediaPaths.Count == 0) return false;
-        if (!step.TryGetProperty("tool_info", out var info)) return false;
-        return ContainsAuthorizedPath(info);
-    }
+        if (!step.TryGetProperty("tool_info", out var info) || info.ValueKind != JsonValueKind.Object
+            || !info.TryGetProperty("parameters", out var parameters) || parameters.ValueKind != JsonValueKind.Object)
+            return false;
 
-    private bool ContainsAuthorizedPath(JsonElement element)
-    {
-        switch (element.ValueKind)
+        var foundPath = false;
+        foreach (var property in parameters.EnumerateObject())
         {
-            case JsonValueKind.String:
-                var text = element.GetString();
-                if (string.IsNullOrWhiteSpace(text)) return false;
-                foreach (var path in allowedMediaPaths)
-                {
-                    if (text.Contains(path, StringComparison.OrdinalIgnoreCase)
-                        || text.Contains(path.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase))
-                        return true;
-                }
+            if (property.Name.Replace("_", "").ToLowerInvariant() is not ("path" or "absolutepath" or "filepath"))
+                continue;
+            if (property.Value.ValueKind != JsonValueKind.String || property.Value.GetString() is not { } path
+                || !allowedReadPaths.Contains(OperatingSystem.IsWindows() ? path.Replace('/', '\\') : path))
                 return false;
-            case JsonValueKind.Object:
-                foreach (var prop in element.EnumerateObject())
-                    if (ContainsAuthorizedPath(prop.Value)) return true;
-                return false;
-            case JsonValueKind.Array:
-                foreach (var item in element.EnumerateArray())
-                    if (ContainsAuthorizedPath(item)) return true;
-                return false;
-            default:
-                return false;
+            foundPath = true;
         }
+        return foundPath;
     }
 
     private void SetConversationId(string? id)
