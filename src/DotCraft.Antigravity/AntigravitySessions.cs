@@ -18,7 +18,7 @@ internal sealed record AntigravityCheckpoint(
 
 internal sealed class AntigravitySessions(string root, TimeProvider clock)
 {
-    internal const string CheckpointFile = "checkpoint-v1.json";
+    internal const string CheckpointFile = "checkpoint-v2.json";
     private const int MaxShelvedSessions = 64;
     private static readonly TimeSpan Lifetime = TimeSpan.FromDays(7);
 

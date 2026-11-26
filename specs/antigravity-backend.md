@@ -2,9 +2,9 @@
 
 | Field | Value |
 |---|---|
-| Version | 0.4.1 |
+| Version | 0.5.0 |
 | Status | Living |
-| Date | 2026-11-25 |
+| Date | 2026-11-26 |
 
 ## Ownership
 
@@ -35,13 +35,13 @@ The Antigravity backend's chat client advertises `ModelSteeringPolicy` with `Mod
 
 Generation speed and first-token latency use Antigravity's own timing. The plugin reads generation metadata only from the run's isolated CLI session and reports timing only when it matches the usage for the same generation. A generation may include both a reply and tool calls. Its timing belongs with that generation's usage before the tool continuation, not with the next generation. Missing, ambiguous, or unreadable metadata does not affect the turn or its token counts. The host does not infer timing from CLI output arrival because `agy` can batch generated output.
 
-Retained runs are scoped to provider, thread, context window and request kind. Continuation requires matching instructions, model, effort, tools, `allowAiCredits` and history prefix. Any changed request or history starts a fresh run from the complete DotCraft conversation. Compaction and non-turn requests end their run at the final result, and requests without conversation identity use isolated runs.
+Retained runs are scoped to provider, thread, context window and request kind. Reusing a live worker requires matching instructions, model, effort, tools, `allowAiCredits` and history prefix. A model or effort change between completed turns restarts the worker with the new selection and resumes the same CLI conversation. Compaction and non-turn requests end their run at the final result, and requests without conversation identity use isolated runs.
 
 ## Saved sessions
 
 Idle conversation runs remain live for `idleTimeoutSeconds` (default 900 seconds, up to 6 concurrent idle runs). On idle expiry, overflow or orderly host shutdown, a run that completed at a non-tool boundary is shelved. The worker and MCP endpoint stop, but the private CLI conversation is retained for up to seven days (at most 64 shelved sessions per workspace). Shelved sessions retain neither bridged credentials nor endpoint tokens.
 
-The next matching turn in the same workspace, provider, thread and context window resumes with `--conversation <id>` and sends only the new user input. This works across host restarts without relying on the host's process-local backend generation. The plugin checks both the sampling configuration and the full covered history prefix before resuming. A missing, changed or rejected session falls back to a fresh run with complete DotCraft history. Unfinished turns and unanswered tool calls are not saved. Authentication resets invalidate the workspace's saved sessions.
+The next matching turn in the same workspace, provider, thread and context window resumes with `--conversation <id>` and sends only the new user input, including after a host restart or a model or effort change. Native resume requires matching instructions, tool declarations, `allowAiCredits` and the full covered history prefix. A missing, incompatible or rejected session falls back to a fresh run with complete DotCraft history. Unfinished turns and unanswered tool calls are not saved. Authentication resets invalidate the workspace's saved sessions.
 
 Thread forks and subagents receive their DotCraft-provided history in independent CLI conversations. Antigravity's interactive `/fork` does not provide a headless interface for branching an identified source at the required boundary. The plugin never resumes a parent conversation on behalf of a child.
 

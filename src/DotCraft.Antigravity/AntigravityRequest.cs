@@ -19,9 +19,8 @@ internal sealed class AntigravityRequest
     public string SystemPrompt { get; }
     public string ModelSlug { get; }
     public string? EffortToken { get; }
-    public int? MaxOutputTokens { get; }
     public bool AllowAiCredits { get; }
-    public string Fingerprint { get; }
+    public string ResumeFingerprint { get; }
     public JsonArray History { get; }
 
     public AntigravityRequest(
@@ -42,7 +41,6 @@ internal sealed class AntigravityRequest
 
         var effort = ResolveEffort(options);
         (ModelSlug, EffortToken) = models.ResolveLaunchModel(requestedModel, effort);
-        MaxOutputTokens = options?.MaxOutputTokens ?? runtime.MaxOutputTokens;
 
         SystemPrompt = string.Join("\n\n", new[] { options?.Instructions }
             .Concat(Messages.Where(IsInstruction).Select(m => m.Text))
@@ -54,13 +52,8 @@ internal sealed class AntigravityRequest
             .Where(t => !string.IsNullOrWhiteSpace(t)));
 
         History = Snapshot(Messages, reasoning: false);
-        Fingerprint = new JsonArray(
-            ModelSlug,
-            EffortToken,
-            SystemPrompt,
-            Tools.Schema,
-            MaxOutputTokens,
-            AllowAiCredits).ToJsonString(AntigravityJson.Compact);
+        ResumeFingerprint = new JsonArray(SystemPrompt, Tools.Schema, AllowAiCredits)
+            .ToJsonString(AntigravityJson.Compact);
     }
 
     public string BuildRelayAgentMarkdown()
@@ -220,7 +213,7 @@ internal sealed class AntigravityRequest
 
     public JsonNode?[]? After(AntigravityCheckpoint checkpoint)
     {
-        if (History.Count <= checkpoint.HistoryCount || Hash(Fingerprint) != checkpoint.Fingerprint)
+        if (History.Count <= checkpoint.HistoryCount || Hash(ResumeFingerprint) != checkpoint.Fingerprint)
             return null;
 
         return HistoryHash(History.Take(checkpoint.HistoryCount)) == checkpoint.HistoryHash

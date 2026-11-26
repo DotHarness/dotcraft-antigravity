@@ -169,12 +169,14 @@ internal sealed class AntigravityRun : IAsyncDisposable
         bool awaitingTools;
         lock (_state)
         {
-            if (!IsWaiting || _request.Fingerprint != request.Fingerprint)
+            if (!IsWaiting || _request.ResumeFingerprint != request.ResumeFingerprint)
                 return ResumeOutcome.Incompatible;
             added = request.After(_expected!);
             if (added is null)
                 return ResumeOutcome.Incompatible;
             awaitingTools = AwaitingTools;
+            if (_request.ModelSlug != request.ModelSlug || _request.EffortToken != request.EffortToken)
+                return awaitingTools ? ResumeOutcome.Incompatible : ResumeOutcome.NeedsConversationRespawn;
         }
 
         if (awaitingTools)
@@ -278,7 +280,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
 
     public AntigravityCheckpoint? GetCheckpoint() =>
         !IsBusy && _completedHistory is { } history && ConversationId is { Length: > 0 } id
-            ? AntigravityCheckpoint.Capture(id, _request.Fingerprint, history, _allowedMediaPaths)
+            ? AntigravityCheckpoint.Capture(id, _request.ResumeFingerprint, history, _allowedMediaPaths)
             : null;
 
     public async Task<PrivateDirectory?> DetachDirectoryForShelfAsync()

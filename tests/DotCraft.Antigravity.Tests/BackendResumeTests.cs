@@ -53,6 +53,45 @@ public sealed class BackendResumeTests
     }
 
     [Theory]
+    [InlineData(false, "gemini-4-neon", "ExtraHigh", "gemini-4-neon-xhigh", "xhigh")]
+    [InlineData(true, "gemini-3.8-flash", "Medium", "gemini-3.8-flash-medium", "medium")]
+    public async Task ModelOrEffortChangeResumesConversationAndSendsOnlyNewInput(
+        bool restartHost, string model, string effort, string expectedModel, string expectedEffort)
+    {
+        await using var fixture = new BackendFixture(idleTimeoutSeconds: 120);
+        using var scope = BackendFixture.Conversation();
+        var history = new List<ChatMessage> { new(ChatRole.User, "first question") };
+
+        var first = await SampleAsync("gemini-4-neon", "High");
+        var originalPid = Assert.Single(fixture.ChatPids);
+        var conversationId = Assert.IsType<string>(first.ResponseId);
+        history.AddRange(first.Messages);
+        history.Add(new(ChatRole.User, "next question"));
+
+        if (restartHost)
+            await fixture.RestartAsync();
+
+        var next = await SampleAsync(model, effort);
+
+        var capture = Assert.Single(SubsequentCaptures(fixture, originalPid));
+        var args = Args(capture);
+        Assert.Contains("--conversation", args);
+        Assert.Equal(conversationId, args[Array.IndexOf(args, "--conversation") + 1]);
+        Assert.Equal(conversationId, next.ResponseId);
+        Assert.Equal(expectedModel, args[Array.IndexOf(args, "--model") + 1]);
+        Assert.Equal(expectedEffort, args[Array.IndexOf(args, "--effort") + 1]);
+        Assert.Equal("next question", Input(capture));
+
+        async Task<ChatResponse> SampleAsync(string modelId, string reasoningEffort)
+        {
+            var runtime = fixture.Runtime with { Model = modelId };
+            using var pipeline = ProviderPipelineOptionsScope.Push(new(runtime, reasoningEffort, null, true, "standard", false, null));
+            using var client = fixture.Provider.CreateChatClient(runtime);
+            return await client.GetResponseAsync(history).WaitAsync(TimeSpan.FromSeconds(15));
+        }
+    }
+
+    [Theory]
     [InlineData("history")]
     [InlineData("window")]
     [InlineData("instructions")]
