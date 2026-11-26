@@ -40,15 +40,12 @@ internal sealed partial class AntigravityModels
         lock (_gate) _snapshot = BuildFallbackSnapshot();
     }
 
-    public CatalogSnapshot UpdateFromCliOutput(string stdout, DateTimeOffset observedAt)
+    public bool TryUpdateFromCliOutput(string stdout, DateTimeOffset observedAt)
     {
         var parsed = Parse(stdout, observedAt);
-        if (parsed.Entries.Count == 0) return Current;
-        lock (_gate)
-        {
-            _snapshot = parsed;
-            return parsed;
-        }
+        if (parsed.Entries.Count == 0) return false;
+        lock (_gate) _snapshot = parsed;
+        return true;
     }
 
     public ModelCatalogEntry? FindModel(string modelId)

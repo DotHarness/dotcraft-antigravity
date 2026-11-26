@@ -93,11 +93,12 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
         var status = await account.GetStatusAsync(ct);
         if (!status.IsAuthenticated)
         {
-            await StopRunsAsync();
-            var code = status.FailureCode ?? "Antigravity.LoginRequired";
-            var message = status.FailureMessage ?? AntigravityAccount.LoginHint;
+            var code = status.FailureCode;
+            var message = status.FailureMessage;
+            var needsLogin = code == AntigravityAccount.LoginRequiredCode;
             throw new ProviderFailureException(
-                new ProviderFailure(ProviderFailureKind.Unauthorized, 401, code) { Message = message },
+                new ProviderFailure(needsLogin ? ProviderFailureKind.Unauthorized : ProviderFailureKind.Other,
+                    HttpStatus: needsLogin ? 401 : null, ProviderErrorCode: code) { Message = message },
                 new InvalidOperationException($"{code}: {message}"));
         }
     }

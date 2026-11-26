@@ -59,6 +59,45 @@ public sealed class BackendAccountTests
     }
 
     [Fact]
+    public async Task FailedModelProbePreservesLiveAndSavedConversations()
+    {
+        await using var fixture = new BackendFixture(idleTimeoutSeconds: 120);
+        var catalog = Assert.IsAssignableFrom<IModelCatalogProvider>(fixture.Provider);
+        var savedHistory = new List<ChatMessage> { new(ChatRole.User, "saved conversation") };
+        string? savedId;
+        using (BackendFixture.Conversation(thread: "saved"))
+        {
+            var saved = await fixture.Client.GetResponseAsync(savedHistory);
+            savedId = saved.ResponseId;
+            savedHistory.AddRange(saved.Messages);
+        }
+        await fixture.Backend.RetireIdleNowAsync();
+
+        using var scope = BackendFixture.Conversation();
+        var liveHistory = new List<ChatMessage> { new(ChatRole.User, "live conversation") };
+        var live = await fixture.Client.GetResponseAsync(liveHistory);
+        liveHistory.AddRange(live.Messages);
+        liveHistory.Add(new(ChatRole.User, "next message"));
+
+        var unavailable = Path.Combine(fixture.Root, "fake-models-unavailable");
+        await File.WriteAllTextAsync(unavailable, "");
+        var refresh = await catalog.FetchModelsAsync(fixture.Runtime, default);
+        Assert.Equal(ModelCatalogErrorCode.Unknown, refresh.ErrorCode);
+
+        var failure = await Assert.ThrowsAsync<ProviderFailureException>(() => fixture.Client.GetResponseAsync(liveHistory));
+        Assert.Equal("Antigravity.AuthProbeFailed", failure.Failure.ProviderErrorCode);
+        Assert.NotEqual(ProviderFailureKind.Unauthorized, failure.Failure.Kind);
+
+        File.Delete(unavailable);
+        var continuation = await fixture.Client.GetResponseAsync(liveHistory);
+        Assert.Equal(live.ResponseId, continuation.ResponseId);
+
+        using var savedScope = BackendFixture.Conversation(thread: "saved");
+        savedHistory.Add(new(ChatRole.User, "restore saved conversation"));
+        Assert.Equal(savedId, (await fixture.Client.GetResponseAsync(savedHistory)).ResponseId);
+    }
+
+    [Fact]
     public async Task MissingCliExecutableReportsCliNotFound()
     {
         var root = Path.Combine(Path.GetTempPath(), "dotcraft-agy-missing-" + Guid.NewGuid().ToString("N"));

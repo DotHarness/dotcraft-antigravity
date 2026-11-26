@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Version | 0.5.0 |
+| Version | 0.5.1 |
 | Status | Living |
 | Date | 2026-11-26 |
 
@@ -49,8 +49,8 @@ Thread forks and subagents receive their DotCraft-provided history in independen
 
 - One `cli` authentication method (`Antigravity CLI account`) delegates credentials to `agy`.
 - Executable lookup honors `executablePath`, `ANTIGRAVITY_COMMAND` / `AGY_CLI_PATH` / `ANTIGRAVITY_CLI_PATH` and `PATH` before probing standard per-OS install locations, including `%LOCALAPPDATA%\agy\bin\agy.exe` on Windows.
-- The authentication status check verifies CLI presence (`Antigravity.CliNotFound`) and probes authentication via `agy models` (`Antigravity.LoginRequired` when unauthenticated), without ever reading credential contents. Authenticated status is cached with single-flight execution for 60 seconds and invalidated on login, logout or unauthorized sampling failures.
-- Sign-in probes fresh CLI status and completes immediately when already signed in. Otherwise, it launches `agy acp --login` with `BROWSER=dotcraft-no-browser`, extracts the sign-in link from either `stdout` or `stderr` as an `auth_url` event, and races `manual_code` prompts against CLI exit so both copy-paste codes and browser localhost callbacks complete cleanly.
+- The authentication status check verifies CLI presence (`Antigravity.CliNotFound`) and probes via `agy models` without reading credential contents. Only an explicit CLI authentication error from the probe reports `Antigravity.LoginRequired`. Timeouts and other failures report that status could not be checked. A failed probe leaves existing workers and saved sessions intact. Authenticated status is cached with single-flight execution for 60 seconds and invalidated on login, logout or unauthorized sampling failures.
+- Sign-in probes fresh CLI status and completes immediately when already signed in. If the CLI reports that sign-in is required, the plugin launches `agy acp --login` with `BROWSER=dotcraft-no-browser`, extracts the sign-in link from either `stdout` or `stderr` as an `auth_url` event, and races `manual_code` prompts against CLI exit so both copy-paste codes and browser localhost callbacks complete cleanly. A completed sign-in invalidates the previous account's sessions.
 - Sign-out stops retained runs, clears cached auth/catalog/usage/limit state, and invokes `agy -p "/logout" --output-format json`.
 - Model discovery parses `agy models`, grouping effort-suffixed slugs (`-low`, `-medium`, `-high`, `-xhigh`, `-max`) into one public model entry with `ModelReasoningSupport` while preserving exact CLI slugs per effort. `IProviderModelRuntimeResolver` projects model metadata, vision capability and context window bounds matching `agy` (`1_048_576` for Gemini/Orchestrator, `1_000_000` for Claude, `131_072` for GPT-OSS).
 

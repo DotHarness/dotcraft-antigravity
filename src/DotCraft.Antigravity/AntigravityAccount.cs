@@ -87,6 +87,10 @@ internal sealed partial class AntigravityAccount(
     string? configDirectory = null,
     AntigravityAuthStatusCache? authCache = null)
 {
+    public const string LoginRequiredCode = "Antigravity.LoginRequired";
+    private const string ProbeFailedCode = "Antigravity.AuthProbeFailed";
+    private const string ProbeTimeoutCode = "Antigravity.AuthProbeTimeout";
+
     public const string LoginHint =
         "Sign in to Antigravity from provider settings, or run `agy` (or `agy acp --login`) in your terminal, then try again.";
 
@@ -111,56 +115,41 @@ internal sealed partial class AntigravityAccount(
         }
 
         using var timeout = Budget(ct, TimeSpan.FromSeconds(15));
-        await using var dir = new PrivateDirectory(root, "probe-");
-        var (isolatedHome, _) = await AntigravityEnvironment.PrepareIsolatedHomeAsync(
-            dir, settings.AllowAiCredits, null, timeout.Token, configDirectory);
-        var env = AntigravityEnvironment.BuildChildEnvironment(isolatedHome, explicitConfigDir: configDirectory);
-        var work = dir.EnsureSubdirectory("work");
-
         try
         {
-            await using var process = new AntigravityProcess(executable, work, ["models"], env);
+            await using var dir = new PrivateDirectory(root, "probe-");
+            var (isolatedHome, _) = await AntigravityEnvironment.PrepareIsolatedHomeAsync(
+                dir, settings.AllowAiCredits, null, timeout.Token, configDirectory);
+            var env = AntigravityEnvironment.BuildChildEnvironment(isolatedHome, explicitConfigDir: configDirectory);
+            await using var process = new AntigravityProcess(executable, dir.EnsureSubdirectory("work"), ["models"], env);
             var (exitCode, stdout, stderr) = await process.ReadToExitAsync(timeout.Token);
-            if (exitCode == 0)
-            {
-                var parsed = models.UpdateFromCliOutput(stdout, _clock.GetUtcNow());
-                if (parsed.Entries.Count > 0 && parsed.Source == "cli")
-                {
-                    return new(
-                        IsAuthenticated: true,
-                        AccountId: "agy-cli",
-                        DisplayName: "Google Antigravity");
-                }
-            }
 
-            var detail = $"{stderr}\n{stdout}".Trim();
-            if (AuthPromptRegex().IsMatch(detail) || exitCode != 0)
-            {
-                return new(
-                    IsAuthenticated: false,
-                    FailureCode: "Antigravity.LoginRequired",
-                    FailureMessage: LoginHint);
-            }
+            if (exitCode == 0 && models.TryUpdateFromCliOutput(stdout, _clock.GetUtcNow()))
+                return new(IsAuthenticated: true, AccountId: "agy-cli", DisplayName: "Google Antigravity");
+
+            if (AuthPromptRegex().IsMatch($"{stderr}\n{stdout}"))
+                return new(IsAuthenticated: false, FailureCode: LoginRequiredCode, FailureMessage: LoginHint);
+
+            var detail = exitCode == 0 ? "no models returned" : $"CLI exit code {exitCode}";
+            return new(IsAuthenticated: false, FailureCode: ProbeFailedCode,
+                FailureMessage: $"Could not check Antigravity sign-in status ({detail}).");
         }
         catch (InvalidOperationException ex) when (ex.Message.StartsWith("Antigravity.CliNotFound", StringComparison.Ordinal))
         {
-            return new(
-                IsAuthenticated: false,
-                FailureCode: "Antigravity.CliNotFound",
-                FailureMessage: InstallHint);
+            return new(IsAuthenticated: false, FailureCode: "Antigravity.CliNotFound", FailureMessage: InstallHint);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        catch (OperationCanceledException) when (
+            timeout.IsCancellationRequested && !ct.IsCancellationRequested
+            && !backendStopping.IsCancellationRequested && !providerStopping.IsCancellationRequested)
         {
-            return new(
-                IsAuthenticated: false,
-                FailureCode: "Antigravity.LoginRequired",
-                FailureMessage: LoginHint);
+            return new(IsAuthenticated: false, FailureCode: ProbeTimeoutCode,
+                FailureMessage: "Timed out while checking Antigravity sign-in status.");
         }
-
-        return new(
-            IsAuthenticated: false,
-            FailureCode: "Antigravity.LoginRequired",
-            FailureMessage: LoginHint);
+        catch (IOException)
+        {
+            return new(IsAuthenticated: false, FailureCode: ProbeFailedCode,
+                FailureMessage: "Could not read Antigravity CLI status.");
+        }
     }
 
     public async Task<ProviderAuthenticationStatus> LoginAsync(
@@ -172,20 +161,21 @@ internal sealed partial class AntigravityAccount(
             throw new ProviderAuthenticationException("Antigravity.AuthMethod", "Unknown authentication method.");
 
         var status = await GetStatusAsync(ct, forceRefresh: true);
-        if (status.FailureCode == "Antigravity.CliNotFound")
-            throw new ProviderAuthenticationException("Antigravity.CliNotFound", InstallHint);
+        if (status.IsAuthenticated)
+            return status;
+        if (status.FailureCode != LoginRequiredCode)
+            throw new ProviderAuthenticationException(status.FailureCode!, status.FailureMessage!);
 
-        if (!status.IsAuthenticated)
-        {
-            await SignInAsync(interaction, ct);
-            status = await GetStatusAsync(ct, forceRefresh: true);
-            if (!status.IsAuthenticated)
-                throw new ProviderAuthenticationException("Antigravity.LoginRequired", LoginHint);
-        }
-
+        await SignInAsync(interaction, ct);
         limits.Clear();
         usage.ClearCache();
+        models.Reset();
         await stopRuns();
+
+        status = await GetStatusAsync(ct, forceRefresh: true);
+        if (!status.IsAuthenticated)
+            throw new ProviderAuthenticationException(status.FailureCode!, status.FailureMessage!);
+
         return status;
     }
 
@@ -437,8 +427,13 @@ internal sealed partial class AntigravityAccount(
             return new ModelCatalogResult
             {
                 Success = false,
-                ErrorCode = ModelCatalogErrorCode.Unauthorized,
-                ErrorMessage = status.FailureMessage ?? LoginHint,
+                ErrorCode = status.FailureCode switch
+                {
+                    LoginRequiredCode => ModelCatalogErrorCode.Unauthorized,
+                    ProbeTimeoutCode => ModelCatalogErrorCode.Timeout,
+                    _ => ModelCatalogErrorCode.Unknown
+                },
+                ErrorMessage = status.FailureMessage,
                 ProviderId = runtime.ProviderId,
                 Protocol = runtime.Protocol,
                 Models = models.Current.Entries.ToList(),
@@ -473,6 +468,6 @@ internal sealed partial class AntigravityAccount(
     [GeneratedRegex(@"\x1B\[[0-9;?]*[A-Za-z]")]
     private static partial Regex AnsiRegex();
 
-    [GeneratedRegex(@"authentication required|not logged in|sign in|unauthorized|login required", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"authentication required|not authenticated|not logged in|please sign in|sign in required|unauthorized|login required", RegexOptions.IgnoreCase)]
     private static partial Regex AuthPromptRegex();
 }

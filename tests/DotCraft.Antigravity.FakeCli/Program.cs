@@ -35,6 +35,12 @@ if (args.FirstOrDefault() == "models")
         return 1;
     }
 
+    if (File.Exists(Path.Combine(root, "fake-models-unavailable")))
+    {
+        await Console.Error.WriteLineAsync("Model listing is temporarily unavailable.");
+        return 2;
+    }
+
     var modelsFile = Path.Combine(root, "fake-models.txt");
     if (File.Exists(modelsFile))
     {
