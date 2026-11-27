@@ -1,5 +1,7 @@
 using System.Text.Json;
 using DotCraft.Agents;
+using DotCraft.Contributions;
+using DotCraft.Sessions;
 using Microsoft.Extensions.AI;
 using Xunit;
 
@@ -40,21 +42,26 @@ public sealed class BackendResumeTests
         var response = await fixture.Client.GetResponseAsync(history, options);
 
         Assert.Equal(ChatFinishReason.Stop, response.FinishReason);
-        var next = SubsequentCaptures(fixture, firstPid);
-        var resume = Assert.Single(next, c => Args(c).Contains("--conversation"));
-        var args = Args(resume);
-        Assert.Equal($"conv-{firstPid}", args[Array.IndexOf(args, "--conversation") + 1]);
+        var resume = Assert.Single(fixture.Files("session-*.json"), c => c.GetProperty("resume").GetString() == first.ResponseId);
         Assert.Equal(work, resume.GetProperty("cwd").GetString());
-        Assert.Equal("next question", Input(resume));
+        Assert.Equal(1, resume.GetProperty("mcpServerCount").GetInt32());
+        var next = Assert.Single(SubsequentCaptures(fixture, firstPid));
         if (failure is null)
-            Assert.Single(next);
+        {
+            Assert.Equal(first.ResponseId, response.ResponseId);
+            Assert.Equal("next question", Input(next));
+        }
         else
-            Assert.Contains("Conversation history", Input(Assert.Single(next, c => !Args(c).Contains("--conversation"))));
+        {
+            Assert.NotEqual(first.ResponseId, response.ResponseId);
+            Assert.Null(next.GetProperty("resume").GetString());
+            Assert.Contains("Conversation history", Input(next));
+        }
     }
 
     [Theory]
-    [InlineData(false, "gemini-4-neon", "ExtraHigh", "gemini-4-neon-xhigh", "xhigh")]
-    [InlineData(true, "gemini-3.8-flash", "Medium", "gemini-3.8-flash-medium", "medium")]
+    [InlineData(false, "gemini-4-neon", "ExtraHigh", "gemini-4-neon", "xhigh")]
+    [InlineData(true, "gemini-3.8-flash", "Medium", "gemini-3.8-flash", "medium")]
     public async Task ModelOrEffortChangeResumesConversationAndSendsOnlyNewInput(
         bool restartHost, string model, string effort, string expectedModel, string expectedEffort)
     {
@@ -73,13 +80,16 @@ public sealed class BackendResumeTests
 
         var next = await SampleAsync(model, effort);
 
-        var capture = Assert.Single(SubsequentCaptures(fixture, originalPid));
-        var args = Args(capture);
-        Assert.Contains("--conversation", args);
-        Assert.Equal(conversationId, args[Array.IndexOf(args, "--conversation") + 1]);
+        var capture = restartHost
+            ? Assert.Single(SubsequentCaptures(fixture, originalPid))
+            : Assert.Single(fixture.Files($"prompt-{originalPid}-2.json"));
+        if (restartHost)
+            Assert.Equal(conversationId, capture.GetProperty("resume").GetString());
+        else
+            Assert.Equal(originalPid, Assert.Single(fixture.ChatPids));
         Assert.Equal(conversationId, next.ResponseId);
-        Assert.Equal(expectedModel, args[Array.IndexOf(args, "--model") + 1]);
-        Assert.Equal(expectedEffort, args[Array.IndexOf(args, "--effort") + 1]);
+        Assert.Equal(expectedModel, capture.GetProperty("model").GetString());
+        Assert.Equal(expectedEffort, capture.GetProperty("effort").GetString());
         Assert.Equal("next question", Input(capture));
 
         async Task<ChatResponse> SampleAsync(string modelId, string reasoningEffort)
@@ -88,6 +98,47 @@ public sealed class BackendResumeTests
             using var pipeline = ProviderPipelineOptionsScope.Push(new(runtime, reasoningEffort, null, true, "standard", false, null));
             using var client = fixture.Provider.CreateChatClient(runtime);
             return await client.GetResponseAsync(history).WaitAsync(TimeSpan.FromSeconds(15));
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RejectedEffortDoesNotLoseTheNativeConversation(bool restartHost)
+    {
+        await using var fixture = new BackendFixture(idleTimeoutSeconds: 120);
+        using var scope = BackendFixture.Conversation();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var history = new List<ChatMessage> { new(ChatRole.User, "first question") };
+
+        var first = await SampleAsync("gemini-4-neon", "High");
+        var originalId = Assert.IsType<string>(first.ResponseId);
+        history.AddRange(first.Messages);
+        history.Add(new(ChatRole.User, "next question"));
+
+        if (restartHost)
+            await fixture.RestartAsync();
+
+        var denial = Path.Combine(fixture.Root, "fake-reject-effort");
+        await File.WriteAllTextAsync(denial, "", deadline.Token);
+        var error = await Assert.ThrowsAsync<AntigravityAcpException>(() => SampleAsync("gemini-3.8-flash", "Medium"));
+        Assert.Equal(-32602, error.Code);
+        var rejected = Assert.Single(fixture.Files("rejected-effort-*.json"));
+        Assert.Equal("gemini-3.8-flash", rejected.GetProperty("model").GetString());
+        Assert.Single(fixture.Files("prompt-*.json"));
+        File.Delete(denial);
+
+        var next = await SampleAsync("gemini-4-neon", "High");
+
+        Assert.Equal(originalId, next.ResponseId);
+        Assert.Single(fixture.Files("prompt-*.json"), capture => Input(capture) == "next question");
+
+        async Task<ChatResponse> SampleAsync(string modelId, string reasoningEffort)
+        {
+            var runtime = fixture.Runtime with { Model = modelId };
+            using var pipeline = ProviderPipelineOptionsScope.Push(new(runtime, reasoningEffort, null, true, "standard", false, null));
+            using var client = fixture.Provider.CreateChatClient(runtime);
+            return await client.GetResponseAsync(history, cancellationToken: deadline.Token);
         }
     }
 
@@ -135,8 +186,107 @@ public sealed class BackendResumeTests
 
         Assert.Equal(ChatFinishReason.Stop, response.FinishReason);
         var next = Assert.Single(SubsequentCaptures(fixture, firstPid));
-        Assert.DoesNotContain("--conversation", Args(next));
+        Assert.Null(next.GetProperty("resume").GetString());
         Assert.Contains("Conversation history", Input(next));
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task StopRetainsTheConversationAndHandsOffOnlyInterruptedProgress(bool waitingForTools, bool forceStop)
+    {
+        await using var fixture = new BackendFixture(idleTimeoutSeconds: 120);
+        var options = BackendSamplingTests.Options();
+        const string earlierEvidence = "earlier tool evidence";
+        const string interruptedEvidence = "interrupted tool evidence";
+        var history = new List<ChatMessage>();
+        if (waitingForTools)
+        {
+            history.Add(new(ChatRole.User, "Record earlier context."));
+            history.Add(new(ChatRole.Assistant, [new FunctionCallContent("earlier-call", "earlier_tool")]));
+            history.Add(new(ChatRole.Tool, [new FunctionResultContent("earlier-call", new string('a', 20_000) + earlierEvidence)]));
+        }
+        history.Add(new(ChatRole.User, "Complete the first task."));
+        string? conversationId;
+        using (BackendFixture.Conversation(turn: "first"))
+        {
+            var first = await fixture.Client.GetResponseAsync(history, options);
+            conversationId = first.ResponseId;
+            history.AddRange(first.Messages);
+        }
+
+        var stoppedPrompt = waitingForTools ? "parallel" : "hang";
+        history.Add(new(ChatRole.User, stoppedPrompt));
+        using (BackendFixture.Conversation(turn: "stopped"))
+        {
+            if (waitingForTools)
+            {
+                var toolRound = await fixture.Client.GetResponseAsync(history, options);
+                history.AddRange(toolRound.Messages);
+                foreach (var call in toolRound.Messages.SelectMany(m => m.Contents).OfType<FunctionCallContent>())
+                    history.Add(new(ChatRole.Tool, [new FunctionResultContent(call.CallId, new string('b', 20_000) + interruptedEvidence)]));
+            }
+            else
+            {
+                using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+                {
+                    await foreach (var update in fixture.Client.GetStreamingResponseAsync(history, options, stop.Token))
+                    {
+                        if (update.Text == "ready")
+                            await stop.CancelAsync();
+                    }
+                });
+            }
+        }
+
+        var originalPid = Assert.Single(fixture.ChatPids);
+        if (forceStop)
+            await File.WriteAllTextAsync(Path.Combine(fixture.Root, "fake-ignore-cancel"), "");
+        if (waitingForTools)
+            await fixture.Backend.OnTurnEndedAsync(new TurnLifecycleContext("thread", "stopped") { Status = TurnStatus.Cancelled });
+
+        Assert.Equal(!forceStop, BackendFixture.IsAlive(originalPid));
+        if (forceStop)
+        {
+            Assert.Equal(2, Assert.Single(fixture.Files($"cancel-ignored-{originalPid}.json")).GetProperty("pendingBefore").GetInt32());
+        }
+        else
+        {
+            var cancel = Assert.Single(fixture.Files($"cancel-{originalPid}-*.json"));
+            Assert.Equal(waitingForTools ? 2 : 0, cancel.GetProperty("pendingBefore").GetInt32());
+            Assert.Equal(0, cancel.GetProperty("pendingAfter").GetInt32());
+        }
+
+        history.Add(new(ChatRole.User, "<turn_aborted>The previous turn was interrupted.</turn_aborted>"));
+        history.Add(new(ChatRole.User, "Continue with the remaining task."));
+        using var nextTurn = BackendFixture.Conversation(turn: "next");
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var next = await fixture.Client.GetResponseAsync(history, options, deadline.Token);
+
+        Assert.Equal(conversationId, next.ResponseId);
+        var capture = forceStop
+            ? Assert.Single(SubsequentCaptures(fixture, originalPid))
+            : Assert.Single(fixture.Files($"prompt-{originalPid}-3.json"));
+        if (forceStop)
+            Assert.Equal(conversationId, capture.GetProperty("resume").GetString());
+        else
+            Assert.Equal(originalPid, Assert.Single(fixture.ChatPids));
+        var input = Input(capture);
+        Assert.DoesNotContain(stoppedPrompt, input);
+        Assert.Contains("<turn_aborted>", input);
+        Assert.Contains("Continue with the remaining task.", input);
+        if (waitingForTools)
+        {
+            Assert.Equal(2, fixture.Files("call-*.json").Length);
+            Assert.Empty(fixture.Files("mcp-results-*.json"));
+            var handoff = Path.Combine(capture.GetProperty("cwd").GetString()!, AntigravityHandoff.FileName);
+            var evidence = await File.ReadAllTextAsync(handoff, deadline.Token);
+            Assert.Contains(earlierEvidence, evidence);
+            Assert.Contains(interruptedEvidence, evidence);
+            Assert.DoesNotContain(interruptedEvidence, input);
+        }
     }
 
     [Fact]
@@ -155,9 +305,6 @@ public sealed class BackendResumeTests
 
     private static JsonElement[] SubsequentCaptures(BackendFixture fixture, int firstPid) =>
         fixture.Files("capture-*.json").Where(c => c.GetProperty("pid").GetInt32() != firstPid).ToArray();
-
-    private static string?[] Args(JsonElement capture) =>
-        capture.GetProperty("args").EnumerateArray().Select(a => a.GetString()).ToArray();
 
     private static string Input(JsonElement capture) =>
         capture.GetProperty("input").GetProperty("message").GetProperty("content").GetString()!;

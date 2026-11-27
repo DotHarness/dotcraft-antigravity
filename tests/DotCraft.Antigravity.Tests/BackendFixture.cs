@@ -48,8 +48,9 @@ internal sealed class BackendFixture : IAsyncDisposable
     public static IDisposable Conversation(
         string thread = "thread",
         string window = "window",
-        ProviderRequestKind kind = ProviderRequestKind.Turn) =>
-        ProviderRequestContextScope.Push(new(new(thread, thread, null, null, "turn", window, kind, 0, "ag", null)));
+        ProviderRequestKind kind = ProviderRequestKind.Turn,
+        string turn = "turn") =>
+        ProviderRequestContextScope.Push(new(new(thread, thread, null, null, turn, window, kind, 0, "ag", null)));
 
     public JsonElement[] Files(string pattern) =>
         Directory.GetFiles(Root, pattern)

@@ -2,7 +2,6 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
@@ -24,10 +23,10 @@ internal sealed class AntigravityMcpServer(
     CancellationToken stopping) : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<string, TaskCompletionSource<CallToolResult>> _pending = new(StringComparer.Ordinal);
-    private readonly string _token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
     private WebApplication? _app;
 
     public string Address { get; private set; } = string.Empty;
+    public string AuthorizationHeader { get; } = "Bearer " + Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
 
     public async Task StartAsync(CancellationToken ct)
     {
@@ -50,7 +49,7 @@ internal sealed class AntigravityMcpServer(
         _app = builder.Build();
         _app.Use(async (context, next) =>
         {
-            if (context.Request.Headers.Authorization != "Bearer " + _token)
+            if (context.Request.Headers.Authorization != AuthorizationHeader)
             {
                 context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                 return;
@@ -63,23 +62,6 @@ internal sealed class AntigravityMcpServer(
             .Features.Get<IServerAddressesFeature>()!
             .Addresses.Single() + "/mcp";
     }
-
-    public JsonObject Configuration => new()
-    {
-        ["mcpServers"] = new JsonObject
-        {
-            [AntigravityTools.ServerName] = new JsonObject
-            {
-                ["serverUrl"] = Address,
-                ["url"] = Address,
-                ["headers"] = new JsonObject
-                {
-                    ["Authorization"] = "Bearer " + _token
-                },
-                ["timeoutSeconds"] = 3600
-            }
-        }
-    };
 
     public void Complete(string callId, object? result, bool isError = false)
     {
@@ -122,12 +104,16 @@ internal sealed class AntigravityMcpServer(
         }
     }
 
+    public void CancelPending()
+    {
+        foreach (var (id, _) in _pending)
+            if (_pending.TryRemove(id, out var pending))
+                pending.TrySetCanceled();
+    }
+
     public async ValueTask DisposeAsync()
     {
-        foreach (var (_, pending) in _pending)
-            pending.TrySetCanceled();
-        _pending.Clear();
-
+        CancelPending();
         if (_app is not null)
         {
             await _app.StopAsync(CancellationToken.None);

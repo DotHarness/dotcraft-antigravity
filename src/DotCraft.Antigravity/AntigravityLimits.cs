@@ -120,7 +120,8 @@ internal sealed partial class AntigravityLimits(TimeProvider? clock = null)
 
         try
         {
-            var latest = Directory.EnumerateFiles(logDir, "cli-*.log")
+            var latest = Directory.EnumerateFiles(logDir, "acp-*.log")
+                .Concat(Directory.EnumerateFiles(logDir, "cli-*.log"))
                 .Select(path => new FileInfo(path))
                 .OrderByDescending(info => info.LastWriteTimeUtc)
                 .FirstOrDefault();

@@ -56,13 +56,15 @@ internal sealed class AntigravityRequest
             .ToJsonString(AntigravityJson.Compact);
     }
 
-    public string BuildRelayAgentMarkdown(bool hasHandoff)
+    public string BuildRelayAgentMarkdown(bool allowPrivateReads)
     {
         var body = string.IsNullOrWhiteSpace(SystemPrompt)
             ? "You are a helpful assistant."
             : SystemPrompt;
-        if (hasHandoff)
-            body += "\n\nThe one exception to the built-in tool restriction is reading the explicitly provided conversation handoff file.";
+        if (Tools.Count > 0)
+            body += "\n\nUse the exposed mcp_dotcraft_<tool> tools directly when available.";
+        if (allowPrivateReads)
+            body += "\n\nThe one exception to the built-in tool restriction is viewing explicitly provided private attachments or conversation evidence.";
 
         return $"""
             ---
@@ -71,19 +73,49 @@ internal sealed class AntigravityRequest
             mainAgent: true
             subagent: false
             excludeDefaultComponents: true
-            inheritCustomizations: {(Tools.Count > 0 || hasHandoff ? "true" : "false")}
-            tools: {(hasHandoff ? "[view_file]" : "[]")}
+            inheritCustomizations: {(Tools.Count > 0 || allowPrivateReads ? "true" : "false")}
+            tools: {(allowPrivateReads ? "[view_file]" : "[]")}
             ---
 
             {body}
             """;
     }
 
-    public async Task<(JsonObject Payload, List<string> MediaPaths, string? HandoffPath)> BuildColdInputAsync(
+    public Task<(string Text, List<string> MediaPaths, string? HandoffPath)> BuildColdInputAsync(
+        PrivateDirectory directory,
+        CancellationToken ct) =>
+        BuildConversationInputAsync(Messages, directory, ct, afterStop: false);
+
+    public async Task<(string Text, List<string> MediaPaths, string? HandoffPath)?> BuildResumeInputAsync(
+        AntigravityCheckpoint checkpoint,
         PrivateDirectory directory,
         CancellationToken ct)
     {
-        var conversation = Messages.Where(m => !IsInstruction(m)).ToArray();
+        if (Hash(ResumeFingerprint) != checkpoint.Fingerprint)
+            return null;
+
+        if (checkpoint.SubmittedMessageCount is int submitted)
+        {
+            if (submitted <= 0 || submitted >= Messages.Length
+                || HistoryHash(Snapshot(Messages.Take(submitted), reasoning: false)) != checkpoint.HistoryHash)
+                return null;
+
+            return await BuildConversationInputAsync(Messages[submitted..], directory, ct, afterStop: true);
+        }
+
+        if (After(checkpoint) is { } added && await BuildIncrementalUserInputAsync(added, directory, ct) is { } input)
+            return (input.Text, input.MediaPaths, null);
+
+        return null;
+    }
+
+    private static async Task<(string Text, List<string> MediaPaths, string? HandoffPath)> BuildConversationInputAsync(
+        ChatMessage[] messages,
+        PrivateDirectory directory,
+        CancellationToken ct,
+        bool afterStop)
+    {
+        var conversation = messages.Where(m => !IsInstruction(m)).ToArray();
         var trailingStart = conversation.Length;
         while (trailingStart > 0 && conversation[trailingStart - 1].Role == ChatRole.User)
             trailingStart--;
@@ -96,7 +128,10 @@ internal sealed class AntigravityRequest
 
         if (prior.Length > 0)
         {
-            var handoff = await AntigravityHandoff.BuildAsync(prior, directory, ct);
+            if (afterStop)
+                sections.Add("The previous turn was stopped. Use its recorded progress as evidence, not as a request to rerun tools.");
+
+            var handoff = await AntigravityHandoff.BuildAsync(prior, directory, ct, append: afterStop);
             sections.Add(handoff.Context);
             handoffPath = handoff.File;
             var priorMediaRefs = new List<string>();
@@ -134,10 +169,10 @@ internal sealed class AntigravityRequest
         }
 
         var prompt = sections.Count > 0 ? string.Join("\n\n", sections) : "Continue.";
-        return (AntigravityJson.UserMessage(prompt), mediaPaths, handoffPath);
+        return (prompt, mediaPaths, handoffPath);
     }
 
-    public async Task<(JsonObject Payload, List<string> MediaPaths)?> BuildIncrementalUserInputAsync(
+    public async Task<(string Text, List<string> MediaPaths)?> BuildIncrementalUserInputAsync(
         JsonNode?[] added,
         PrivateDirectory directory,
         CancellationToken ct)
@@ -188,10 +223,10 @@ internal sealed class AntigravityRequest
         }
 
         if (parts.Count == 0) return null;
-        return (AntigravityJson.UserMessage(string.Join("\n\n", parts)), mediaPaths);
+        return (string.Join("\n\n", parts), mediaPaths);
     }
 
-    public bool TryBuildToolGuidance(ReadOnlySpan<JsonNode?> trailing, out JsonArray? guidance)
+    public bool TryBuildSteerPrompt(ReadOnlySpan<JsonNode?> trailing, out JsonArray? guidance)
     {
         guidance = null;
         if (trailing.IsEmpty)
@@ -205,7 +240,7 @@ internal sealed class AntigravityRequest
 
         var messages = Messages.Reverse().TakeWhile(message => message.Role == ChatRole.User).Reverse();
         guidance = new JsonArray(messages.SelectMany(message => message.Contents.OfType<TextContent>())
-            .Select(content => (JsonNode?)new JsonObject { ["userMessage"] = content.Text }).ToArray());
+            .Select(content => (JsonNode?)AntigravityAcpSession.TextBlock(content.Text)).ToArray());
         return true;
     }
 
@@ -216,9 +251,9 @@ internal sealed class AntigravityRequest
         return JsonNode.DeepEquals(expected, prefix) ? History.Skip(expected.Count).ToArray() : null;
     }
 
-    public JsonNode?[]? After(AntigravityCheckpoint checkpoint)
+    private JsonNode?[]? After(AntigravityCheckpoint checkpoint)
     {
-        if (History.Count <= checkpoint.HistoryCount || Hash(ResumeFingerprint) != checkpoint.Fingerprint)
+        if (History.Count <= checkpoint.HistoryCount)
             return null;
 
         return HistoryHash(History.Take(checkpoint.HistoryCount)) == checkpoint.HistoryHash
@@ -443,17 +478,4 @@ internal sealed class AntigravityTools
             ? tool.Name
             : throw new InvalidDataException($"Antigravity.UnknownTool: The CLI requested undeclared tool '{wireName}'.");
 
-    public bool IsBridgedStreamToolName(string? streamToolName)
-    {
-        if (string.IsNullOrWhiteSpace(streamToolName)) return false;
-        var name = streamToolName.Trim();
-        if (_byWire.ContainsKey(name)) return true;
-
-        foreach (var prefix in new[] { $"mcp__{ServerName}__", $"mcp_{ServerName}_", $"{ServerName}/", $"{ServerName}:" })
-        {
-            if (name.StartsWith(prefix, StringComparison.Ordinal) && _byWire.ContainsKey(name[prefix.Length..]))
-                return true;
-        }
-        return false;
-    }
 }

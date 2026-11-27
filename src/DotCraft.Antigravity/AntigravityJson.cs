@@ -18,13 +18,4 @@ internal static class AntigravityJson
     };
 
     public static JsonNode? Value(object? value) => JsonSerializer.SerializeToNode(value);
-
-    public static JsonObject UserMessage(string text) => new()
-    {
-        ["event"] = "user",
-        ["message"] = new JsonObject
-        {
-            ["content"] = text
-        }
-    };
 }

@@ -32,7 +32,7 @@ public sealed class BackendLifetimeAndMcpTests
         var staleRun = PrivateDirectory.Create(Path.Combine(staleRoot, "run-orphan"));
         using var sleeper = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(BackendFixture.Executable)
         {
-            Arguments = "--input-format stream-json --output-format stream-json",
+            Arguments = "acp --process-per-session",
             WorkingDirectory = staleRun,
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
@@ -51,6 +51,37 @@ public sealed class BackendLifetimeAndMcpTests
     }
 
     [Fact]
+    public async Task FirstOutputDisarmsTheStartupWatchdog()
+    {
+        await using var fixture = new BackendFixture(requestTimeoutSeconds: 2);
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+        await using var updates = fixture.Client.GetStreamingResponseAsync([new(ChatRole.User, "hang")], cancellationToken: stop.Token)
+            .GetAsyncEnumerator();
+
+        Assert.True(await updates.MoveNextAsync());
+        Assert.Equal("ready", updates.Current.Text);
+
+        stop.CancelAfter(TimeSpan.FromSeconds(3));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        {
+            while (await updates.MoveNextAsync()) { }
+        });
+    }
+
+    [Fact]
+    public async Task UserEchoAloneDoesNotDisarmTheStartupWatchdog()
+    {
+        await using var fixture = new BackendFixture(requestTimeoutSeconds: 2);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+
+        var error = await Assert.ThrowsAsync<TimeoutException>(() =>
+            fixture.Client.GetResponseAsync([new(ChatRole.User, "echo-only")], cancellationToken: deadline.Token));
+
+        Assert.StartsWith("Antigravity.Timeout:", error.Message);
+        Assert.Equal("echo-only", fixture.Capture.GetProperty("input").GetProperty("message").GetProperty("content").GetString());
+    }
+
+    [Fact]
     public async Task McpEndpointRequiresBearerTokenRejectsUnknownToolsAndReturnsRichResults()
     {
         using var stopping = new CancellationTokenSource();
@@ -65,7 +96,7 @@ public sealed class BackendLifetimeAndMcpTests
         using var unauthorized = await http.PostAsJsonAsync(server.Address, new { jsonrpc = "2.0", id = 1, method = "tools/list" });
         Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
 
-        var authHeader = server.Configuration["mcpServers"]!["dotcraft"]!["headers"]!["Authorization"]!.GetValue<string>();
+        var authHeader = server.AuthorizationHeader;
         await using var client = await McpClient.CreateAsync(new HttpClientTransport(new()
         {
             Endpoint = new Uri(server.Address),

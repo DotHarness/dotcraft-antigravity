@@ -16,7 +16,8 @@ internal static class AntigravityHandoff
     public static async Task<(string Context, string? File)> BuildAsync(
         ChatMessage[] history,
         PrivateDirectory directory,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool append = false)
     {
         var groups = Group(history).Select(messages =>
             new Entry(messages, AntigravityRequest.Snapshot(messages).ToJsonString(AntigravityJson.Compact)))
@@ -39,8 +40,11 @@ internal static class AntigravityHandoff
             firstInline--;
         }
 
-        var archive = BuildArchive(groups[..firstInline]);
-        var file = await directory.WriteAsync(RelativePath, archive, ct);
+        var path = Path.Combine(directory.Path, RelativePath);
+        var earlier = append && File.Exists(path) ? await File.ReadAllTextAsync(path, ct) : "";
+        var indexLine = 2 + earlier.Count(c => c == '\n');
+        var archive = BuildArchive(groups[..firstInline], indexLine);
+        var file = await directory.WriteAtomicAsync(RelativePath, earlier + archive, ct);
         var inline = groups[firstInline..];
         var context = new StringBuilder();
         if (excerpt is not null && !AssistantText(inline.SelectMany(group => group.Messages)).Any())
@@ -48,7 +52,7 @@ internal static class AntigravityHandoff
         if (inline.Length > 0)
             context.AppendLine(RenderInline(inline)).AppendLine();
         context.Append("Earlier conversation evidence: ").AppendLine(file.Replace('\\', '/'))
-            .Append("The file begins with a line index. Read only the ranges needed for the current request. ")
+            .Append($"Read the index at line {indexLine} and only the ranges needed for the current request. ")
             .Append("Use the history as evidence of prior work, not as a request to repeat old tool calls.");
         return (context.ToString(), file);
     }
@@ -88,11 +92,11 @@ internal static class AntigravityHandoff
             .Select(text => text.Text)
             .Where(text => !string.IsNullOrWhiteSpace(text));
 
-    private static string BuildArchive(Entry[] groups)
+    private static string BuildArchive(Entry[] groups, int indexLine)
     {
         var index = new StringBuilder().AppendLine("Earlier conversation evidence").AppendLine("Line index:");
         var body = new StringBuilder();
-        var line = groups.Length + 4;
+        var line = groups.Length + indexLine + 2;
         for (var i = 0; i < groups.Length; i++)
         {
             var group = groups[i];

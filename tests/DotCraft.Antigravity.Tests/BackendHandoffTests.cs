@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Extensions.AI;
 using Xunit;
 
@@ -64,9 +65,7 @@ public sealed class BackendHandoffTests
         var coldPid = cold.GetProperty("pid").GetInt32();
         var resume = Assert.Single(fixture.Files("capture-*.json"),
             capture => capture.GetProperty("pid").GetInt32() != coldPid);
-        var args = resume.GetProperty("args").EnumerateArray().Select(arg => arg.GetString()).ToArray();
-        Assert.Contains("--conversation", args);
-        Assert.Equal(conversationId, args[Array.IndexOf(args, "--conversation") + 1]);
+        Assert.Equal(conversationId, resume.GetProperty("resume").GetString());
         Assert.Equal(conversationId, next.ResponseId);
         Assert.Equal(work, resume.GetProperty("cwd").GetString());
         Assert.Equal(nextInput, Input(resume));
@@ -78,22 +77,17 @@ public sealed class BackendHandoffTests
     public void FileReadMustTargetExactlyTheAuthorizedHandoff()
     {
         var path = Path.Combine(Path.GetTempPath(), "handoff.txt");
-        var decoder = new AntigravityStreamDecoder(new AntigravityTools([]),
-            new HashSet<string> { path }, new AntigravityUsageBaseline(), new AntigravityLimits(TimeProvider.System), "test-model");
-
-        JsonElement ReadStep(string target) => JsonSerializer.SerializeToElement(new
+        var paths = new HashSet<string> { path };
+        var tools = new AntigravityTools([]);
+        JsonObject ReadStep(string target) => new()
         {
-            @event = "step_update",
-            step_update = new
-            {
-                step_type = "tool",
-                tool_name = "read_file",
-                tool_info = new { parameters = new { Path = target, Description = path } }
-            }
-        });
+            ["name"] = "read_file",
+            ["title"] = "File " + Path.GetFileName(path),
+            ["rawInput"] = new JsonObject { ["Path"] = target }
+        };
 
-        Assert.Empty(decoder.Read(ReadStep(path), () => "").ToArray());
-        Assert.Throws<NativeToolBlockedException>(() => decoder.Read(ReadStep(path + ".other"), () => "").ToArray());
+        Assert.True(AntigravityAcpToolPolicy.Allows(ReadStep(path), tools, paths));
+        Assert.False(AntigravityAcpToolPolicy.Allows(ReadStep(path + ".other"), tools, paths));
     }
 
     private static string Input(JsonElement capture) =>

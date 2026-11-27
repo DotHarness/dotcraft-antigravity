@@ -15,6 +15,7 @@ public sealed class Plugin : IDotCraftPlugin
         context.Lifetime.OwnAsync(backend);
         context.Lifetime.Run(backend.SuperviseAsync);
         context.Contributions.Add<IModelBackendSource>(backend);
+        context.Contributions.Add<ITurnLifecycleContributor>(backend);
         return ValueTask.CompletedTask;
     }
 }

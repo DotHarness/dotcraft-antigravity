@@ -7,12 +7,12 @@ namespace DotCraft.Antigravity.Tests;
 public sealed class BackendToolGuidanceTests
 {
     [Fact]
-    public async Task ToolResultsWithQueuedTextContinueTheSameConversation()
+    public async Task QueuedSteerUsesNativePromptWhileMcpResultsStaySeparate()
     {
         await using var fixture = new BackendFixture();
         using var scope = BackendFixture.Conversation();
         var options = BackendSamplingTests.Options();
-        var history = new List<ChatMessage> { new(ChatRole.User, "parallel two-rounds capture-native-steer") };
+        var history = new List<ChatMessage> { new(ChatRole.User, "parallel two-rounds") };
         var first = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
         var id = Assert.IsType<string>(first.ResponseId);
         var pid = Assert.Single(fixture.ChatPids);
@@ -35,6 +35,8 @@ public sealed class BackendToolGuidanceTests
 
         Assert.Equal(id, second.ResponseId);
         Assert.Equal(ChatFinishReason.ToolCalls, second.FinishReason);
+        Assert.Equal(60, second.Usage?.InputTokenCount);
+        Assert.Equal(10, second.Usage?.OutputTokenCount);
         var nextCall = Assert.Single(second.Messages.SelectMany(message => message.Contents).OfType<FunctionCallContent>());
         history.AddRange(second.Messages);
         history.Add(new(ChatRole.Tool, [new FunctionResultContent(nextCall.CallId, "C")
@@ -46,6 +48,8 @@ public sealed class BackendToolGuidanceTests
 
         Assert.Equal(id, final.ResponseId);
         Assert.Equal(ChatFinishReason.Stop, final.FinishReason);
+        Assert.Equal(100, final.Usage?.InputTokenCount);
+        Assert.Equal(15, final.Usage?.OutputTokenCount);
         Assert.Equal(pid, Assert.Single(fixture.ChatPids));
         var results = Assert.Single(fixture.Files("mcp-results-*.json")).EnumerateArray().ToArray();
         Assert.Collection(results,
@@ -63,36 +67,11 @@ public sealed class BackendToolGuidanceTests
                 Assert.True(result.GetProperty("IsError").GetBoolean());
             });
 
-        var invocations = Assert.Single(fixture.Files("steer-*.json")).EnumerateArray().ToArray();
-        Assert.Collection(invocations,
-            invocation => Assert.Empty(invocation.EnumerateArray()),
-            invocation => Assert.Equal([firstInput, secondInput], invocation.EnumerateArray().Select(input => input.GetString()!).ToArray()),
-            invocation => Assert.Empty(invocation.EnumerateArray()));
-        Assert.Empty(Directory.GetFiles(fixture.Root, $"turn-{pid}-*.json"));
-    }
-
-    [Fact]
-    public async Task UnconsumedSteerFailsWithoutReplayingTheTurn()
-    {
-        await using var fixture = new BackendFixture();
-        using var scope = BackendFixture.Conversation();
-        var options = BackendSamplingTests.Options();
-        var history = new List<ChatMessage> { new(ChatRole.User, "parallel capture-native-steer skip-preinvocation") };
-        var first = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
-        Assert.Equal(ChatFinishReason.ToolCalls, first.FinishReason);
-        var pid = Assert.Single(fixture.ChatPids);
-        var calls = first.Messages.SelectMany(message => message.Contents).OfType<FunctionCallContent>().ToArray();
-
-        history.AddRange(first.Messages);
-        history.Add(new(ChatRole.Tool, calls.Select(call => (AIContent)new FunctionResultContent(call.CallId, "tool result")).ToList()));
-        history.Add(new(ChatRole.User, "Queued input"));
-
-        var error = await Assert.ThrowsAsync<InvalidDataException>(() =>
-            fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15)));
-
-        Assert.StartsWith("Antigravity.SteerNotDelivered:", error.Message);
-        Assert.Equal(pid, Assert.Single(fixture.ChatPids));
-        Assert.False(BackendFixture.IsAlive(pid));
+        var steer = Assert.Single(fixture.Files("steer-*.json"));
+        Assert.Equal(2, steer.GetProperty("pending").GetInt32());
+        var inputText = steer.GetProperty("blocks").EnumerateArray().Select(block => block.GetProperty("text").GetString());
+        Assert.Equal(firstInput + "\n\n" + secondInput, string.Join("\n\n", inputText));
+        Assert.Empty(fixture.Files("cancel-*.json"));
     }
 
     [Theory]

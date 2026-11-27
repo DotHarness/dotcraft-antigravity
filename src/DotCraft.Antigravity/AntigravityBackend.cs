@@ -1,15 +1,16 @@
 using System.Runtime.CompilerServices;
-using System.Text.Json.Nodes;
 using DotCraft.Agents;
 using DotCraft.Configuration;
 using DotCraft.Contributions;
+using DotCraft.Sessions;
 using Microsoft.Extensions.AI;
 
 namespace DotCraft.Antigravity;
 
-internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, IAsyncDisposable
+internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, ITurnLifecycleContributor, IAsyncDisposable
 {
     private const int MaxIdleRuns = 6;
+    private static readonly TimeSpan StopConfirmationTimeout = TimeSpan.FromSeconds(3);
 
     private readonly AntigravitySettings _settings;
     private readonly string _root;
@@ -132,18 +133,27 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
                     throw new InvalidOperationException("Antigravity.ConcurrentSampling: This conversation already has an active sampling request.");
 
                 var resumed = false;
+                (string Text, List<string> MediaPaths, string? HandoffPath)? prepared = null;
                 resumedFromShelf = false;
+                if (prior is { AwaitingTools: true } && prior.Identity?.TurnId != identity?.TurnId
+                    && !await StopOrRetireAsync(key, prior))
+                    prior = null;
                 if (prior is not null)
                 {
                     AntigravityRun.ResumeOutcome outcome;
                     try
                     {
-                        outcome = await prior.TryResumeAsync(request, token);
+                        outcome = await prior.TryResumeAsync(request, identity, token);
                     }
                     catch
                     {
-                        _runs.Remove(key);
-                        await RetireAsync(key, prior, shelve: false);
+                        if (token.IsCancellationRequested && identity?.RequestKind == ProviderRequestKind.Turn)
+                            await StopOrRetireAsync(key, prior);
+                        else
+                        {
+                            _runs.Remove(key);
+                            await RetireAsync(key, prior, prior.GetCheckpoint());
+                        }
                         throw;
                     }
 
@@ -151,15 +161,12 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
                     {
                         resumed = true;
                     }
-                    else if (outcome == AntigravityRun.ResumeOutcome.NeedsConversationRespawn)
-                    {
-                        _runs.Remove(key);
-                        await RetireAsync(key, prior, shelve: true);
-                    }
                     else
                     {
                         _runs.Remove(key);
-                        await RetireAsync(key, prior, shelve: false);
+                        if (outcome == AntigravityRun.ResumeOutcome.NeedsConversationRespawn)
+                            prepared = prior.RespawnInput;
+                        await RetireAsync(key, prior, prepared is null ? null : prior.GetCheckpoint());
                     }
                 }
 
@@ -169,7 +176,7 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
                 }
                 else
                 {
-                    (run, resumedFromShelf) = await StartAsync(key, request,
+                    (run, resumedFromShelf) = await StartAsync(key, request, identity, prepared,
                         allowShelf: attempt == 0 && identity?.RequestKind == ProviderRequestKind.Turn, token);
                 }
             }
@@ -223,7 +230,7 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
 
                 if (!fallbackToCold)
                 {
-                    run.VerifySteerDelivered();
+                    token.ThrowIfCancellationRequested();
                     completed = true;
                     _limits.ClearOnSuccess();
                     yield break;
@@ -234,22 +241,25 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
                 await _gate.WaitAsync(CancellationToken.None);
                 try
                 {
-                    if (completed && identity is not null && run.IsWaiting &&
+                    if (token.IsCancellationRequested && identity?.RequestKind == ProviderRequestKind.Turn)
+                        await StopOrRetireAsync(key, run);
+                    else if (completed && identity is not null && run.IsWaiting &&
                         (run.AwaitingTools || identity.RequestKind == ProviderRequestKind.Turn))
                     {
                         run.Release(_clock.GetUtcNow());
-                        var idle = _runs.Where(pair => !pair.Value.IsBusy).OrderBy(pair => pair.Value.LastUsed).ToArray();
+                        var idle = _runs.Where(pair => !pair.Value.IsBusy && !pair.Value.AwaitingTools)
+                            .OrderBy(pair => pair.Value.LastUsed).ToArray();
                         foreach (var (idleKey, idleRun) in idle.Take(Math.Max(0, idle.Length - MaxIdleRuns)))
                         {
                             _runs.Remove(idleKey);
-                            await RetireAsync(idleKey, idleRun, shelve: true);
+                            await RetireAsync(idleKey, idleRun, idleRun.GetCheckpoint());
                         }
                     }
                     else
                     {
                         if (_runs.TryGetValue(key, out var current) && ReferenceEquals(current, run))
                             _runs.Remove(key);
-                        await RetireAsync(key, run, shelve: false);
+                        await RetireAsync(key, run);
                     }
                 }
                 finally
@@ -263,6 +273,8 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
     private async Task<(AntigravityRun Run, bool ResumedFromShelf)> StartAsync(
         string key,
         AntigravityRequest request,
+        ProviderConversationIdentity? identity,
+        (string Text, List<string> MediaPaths, string? HandoffPath)? prepared,
         bool allowShelf,
         CancellationToken ct)
     {
@@ -274,9 +286,8 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
             {
                 var media = checkpoint.MediaFiles.Select(file => Path.Combine(directory.Path, "media", file)).ToArray();
                 var handoff = checkpoint.HasHandoffFile ? Path.Combine(directory.Path, AntigravityHandoff.RelativePath) : null;
-                if (request.After(checkpoint) is { } added && media.All(File.Exists)
-                    && (handoff is null || File.Exists(handoff))
-                    && await request.BuildIncrementalUserInputAsync(added, directory, ct) is { } incremental)
+                if (media.All(File.Exists) && (handoff is null || File.Exists(handoff))
+                    && (prepared ?? await request.BuildResumeInputAsync(checkpoint, directory, ct)) is { } input)
                 {
                     var resumedRun = new AntigravityRun(
                         _settings,
@@ -284,15 +295,16 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
                         _limits,
                         request,
                         Stopping,
+                        identity,
                         existingDirectory: directory,
                         resumeConversationId: checkpoint.ConversationId,
-                        existingMediaPaths: media.Concat(incremental.MediaPaths),
-                        existingHandoffPath: handoff,
+                        existingMediaPaths: media,
+                        existingHandoffPath: input.HandoffPath ?? handoff,
                         configDirectory: _configDirectory,
                         toolBatchWindow: _toolBatchWindow);
 
                     attached = true;
-                    var launched = await LaunchAsync(key, resumedRun, incremental.Payload, incremental.MediaPaths, ct);
+                    var launched = await LaunchAsync(key, resumedRun, input.Text, input.MediaPaths, ct, checkpoint);
                     if (launched is not null)
                         return (launched, true);
                 }
@@ -310,10 +322,11 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
             _limits,
             request,
             Stopping,
+            identity,
             configDirectory: _configDirectory,
             toolBatchWindow: _toolBatchWindow);
 
-        var cold = await LaunchAsync(key, coldRun, initialPayload: null, initialMediaPaths: null, ct)
+        var cold = await LaunchAsync(key, coldRun, initialText: null, initialMediaPaths: null, ct)
             ?? throw new IOException("Antigravity.StartFailed: The Antigravity CLI ended before accepting the request.");
         return (cold, false);
     }
@@ -321,31 +334,62 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
     private async Task<AntigravityRun?> LaunchAsync(
         string key,
         AntigravityRun run,
-        JsonObject? initialPayload,
+        string? initialText,
         IEnumerable<string>? initialMediaPaths,
-        CancellationToken ct)
+        CancellationToken ct,
+        AntigravityCheckpoint? priorCheckpoint = null)
     {
         _runs.Add(key, run);
         try
         {
-            if (await run.StartAsync(initialPayload, initialMediaPaths, ct))
+            if (await run.StartAsync(initialText, initialMediaPaths, ct))
                 return run;
         }
         catch
         {
             _runs.Remove(key);
-            await RetireAsync(key, run, shelve: false);
+            await RetireAsync(key, run, priorCheckpoint);
             throw;
         }
 
         _runs.Remove(key);
-        await RetireAsync(key, run, shelve: false);
+        await RetireAsync(key, run);
         return null;
     }
 
-    private async Task RetireAsync(string key, AntigravityRun run, bool shelve)
+    public async Task OnTurnEndedAsync(TurnLifecycleContext context, CancellationToken cancellationToken = default)
     {
-        if (shelve && run.GetCheckpoint() is { } checkpoint
+        if (context.Status is null || Stopping.IsCancellationRequested) return;
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            foreach (var (key, run) in _runs.ToArray())
+                if (run.AwaitingTools && run.Identity is { } identity &&
+                    identity.CurrentThreadId == context.ThreadId && identity.TurnId == context.TurnId)
+                    await StopOrRetireAsync(key, run);
+        }
+        finally { _gate.Release(); }
+    }
+
+    private async Task<bool> StopOrRetireAsync(string key, AntigravityRun run)
+    {
+        if (!Stopping.IsCancellationRequested && await run.CancelTurnAsync(StopConfirmationTimeout))
+        {
+            run.Release(_clock.GetUtcNow());
+            return true;
+        }
+
+        if (_runs.TryGetValue(key, out var current) && ReferenceEquals(current, run))
+        {
+            _runs.Remove(key);
+            await RetireAsync(key, run, run.GetInterruptedCheckpoint());
+        }
+        return false;
+    }
+
+    private async Task RetireAsync(string key, AntigravityRun run, AntigravityCheckpoint? checkpoint = null)
+    {
+        if (checkpoint is not null
             && await run.DetachDirectoryForShelfAsync() is { } directory)
         {
             await _sessions.SaveAsync(BuildSessionKey(key), directory, checkpoint);
@@ -362,9 +406,9 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
         var now = _clock.GetUtcNow();
         foreach (var (key, run) in _runs.ToArray())
         {
-            if (run.IsBusy || now - run.LastUsed < idleFor) continue;
+            if (run.IsBusy || run.AwaitingTools || now - run.LastUsed < idleFor) continue;
             _runs.Remove(key);
-            await RetireAsync(key, run, shelve: true);
+            await RetireAsync(key, run, run.GetCheckpoint());
         }
 
         if (now >= _nextSessionSweep)
@@ -419,7 +463,7 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
         try
         {
             foreach (var (key, run) in _runs.ToArray())
-                await RetireAsync(key, run, shelve: preserveSessions);
+                await RetireAsync(key, run, preserveSessions ? run.GetCheckpoint() : null);
             _runs.Clear();
 
             if (!preserveSessions)
