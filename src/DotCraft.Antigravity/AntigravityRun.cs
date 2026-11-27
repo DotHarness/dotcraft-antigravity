@@ -412,6 +412,17 @@ internal sealed class AntigravityRun : IAsyncDisposable
                 turn.Accepted = true;
             if (turn.Stopping) return;
 
+            if (type == "usage_update")
+            {
+                if (update["used"] is JsonValue value && value.TryGetValue<long>(out var occupied) && occupied > 0)
+                {
+                    var usage = new UsageContent(new UsageDetails());
+                    ProviderContextUsage.Attach(usage, new(occupied));
+                    _output.Writer.TryWrite(Update([usage]));
+                }
+                return;
+            }
+
             if (type is "tool_call" or "tool_call_update")
             {
                 if (update["name"] is not null)
@@ -457,11 +468,13 @@ internal sealed class AntigravityRun : IAsyncDisposable
         {
             _toolTimer?.Dispose();
             _toolTimer = null;
-            if (_turn is not { Stopping: false } || _stagedCalls.Count == 0 || _expected is not null) return;
+            if (_turn is not { Stopping: false } turn || _stagedCalls.Count == 0 || _expected is not null) return;
             var calls = _stagedCalls.ToArray();
             _stagedCalls.Clear();
             _awaitingCalls = calls.Select(call => call.CallId).ToArray();
             _expected = SnapshotWithAssistant(_turnContents.Concat(calls));
+            if (turn.Usage.ReadToolBoundary() is { } usage)
+                _output.Writer.TryWrite(Update([usage]));
             _output.Writer.TryWrite(Update(calls.Cast<AIContent>().ToList(), ChatFinishReason.ToolCalls));
             _output.Writer.TryComplete();
         }

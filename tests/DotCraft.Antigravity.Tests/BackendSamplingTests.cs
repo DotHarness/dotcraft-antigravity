@@ -9,26 +9,23 @@ namespace DotCraft.Antigravity.Tests;
 public sealed class BackendSamplingTests
 {
     [Fact]
-    public async Task ParallelToolsReturnToHostAndReportUsageAtTheAcpPromptBoundary()
+    public async Task ParallelToolsReportWindowOccupancySeparatelyFromPromptBilling()
     {
         await using var fixture = new BackendFixture();
         using var scope = BackendFixture.Conversation();
         var invoked = 0;
         var options = Options(() => invoked++);
-        var history = new List<ChatMessage> { new(ChatRole.User, "parallel") };
+        var history = new List<ChatMessage> { new(ChatRole.User, "parallel context-metrics") };
 
-        var first = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
+        var (first, firstUsage) = await SampleAsync();
 
         Assert.Equal(ChatFinishReason.ToolCalls, first.FinishReason);
+        AssertContextOnly(Assert.Single(firstUsage), 70);
         var message = Assert.Single(first.Messages);
         var calls = message.Contents.OfType<FunctionCallContent>().ToArray();
         Assert.Equal(2, calls.Length);
-        Assert.Equal(new[] { "Echo.One", "Echo-Two" }.Order(), calls.Select(c => c.Name).Order());
         Assert.Equal("Checking.", first.Text);
-        Assert.Null(first.Usage);
-        Assert.Equal(0, invoked);
         var pid = Assert.Single(fixture.ChatPids);
-        Assert.True(BackendFixture.IsAlive(pid));
 
         var callOne = calls.Single(c => c.Name == "Echo.One");
         var callTwo = calls.Single(c => c.Name == "Echo-Two");
@@ -46,14 +43,18 @@ public sealed class BackendSamplingTests
             })
         ]));
 
-        var final = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
+        var (final, finalUsage) = await SampleAsync();
 
+        Assert.Collection(finalUsage, context => AssertContextOnly(context, 115), billed =>
+        {
+            Assert.True(ProviderContextUsage.IsAttached(billed));
+            Assert.Null(ProviderContextUsage.TryGet(billed));
+            Assert.Equal(160, billed.Details.InputTokenCount);
+            Assert.Equal(25, billed.Details.OutputTokenCount);
+        });
         Assert.Equal("A-result [image/png:2]|B-result", final.Text);
         Assert.Equal(Assert.IsType<string>(first.ResponseId), final.ResponseId);
         Assert.Equal(ChatFinishReason.Stop, final.FinishReason);
-        Assert.Equal(160, final.Usage!.InputTokenCount);
-        Assert.Equal(25, final.Usage.OutputTokenCount);
-        Assert.Equal(0, final.Usage.CachedInputTokenCount);
         Assert.Equal(0, invoked);
         Assert.Single(fixture.ChatPids);
         Assert.True(BackendFixture.IsAlive(pid));
@@ -70,6 +71,22 @@ public sealed class BackendSamplingTests
         Assert.Equal(90, next.Usage.CachedInputTokenCount);
         Assert.Equal("next question", Assert.Single(fixture.Files($"prompt-{pid}-2.json"))
             .GetProperty("input").GetProperty("message").GetProperty("content").GetString());
+
+        async Task<(ChatResponse Response, UsageContent[] Usage)> SampleAsync()
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            var updates = new List<ChatResponseUpdate>();
+            await foreach (var update in fixture.Client.GetStreamingResponseAsync(history, options, timeout.Token))
+                updates.Add(update);
+            return (updates.ToChatResponse(), updates.SelectMany(update => update.Contents).OfType<UsageContent>().ToArray());
+        }
+
+        static void AssertContextOnly(UsageContent usage, long occupied)
+        {
+            Assert.Equal(occupied, Assert.IsType<ProviderContextUsage>(ProviderContextUsage.TryGet(usage)).OccupiedTokens);
+            Assert.Equal(0L, usage.Details.InputTokenCount.GetValueOrDefault());
+            Assert.Equal(0L, usage.Details.OutputTokenCount.GetValueOrDefault());
+        }
     }
 
     [Fact]

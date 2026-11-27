@@ -10,7 +10,7 @@
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
     <ProjectReference Include="../../src/DotCraft.Antigravity/DotCraft.Antigravity.csproj" />
-    <PackageReference Include="DotCraft.Harness" Version="0.14.3" />
+    <PackageReference Include="DotCraft.Harness" Version="0.14.5" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
     <ProjectReference Include="../DotCraft.Antigravity.FakeCli/DotCraft.Antigravity.FakeCli.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>

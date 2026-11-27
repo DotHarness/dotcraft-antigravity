@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Version | 0.8.0 |
+| Version | 0.9.0 |
 | Status | Living |
 | Date | 2026-11-27 |
 
@@ -27,7 +27,7 @@ Each conversation run uses a private directory under the plugin's data root (`Pr
 1. Sampling uses JSON-RPC over `agy acp --process-per-session --agent dotcraft-relay`. The run selects its model and reasoning effort using ACP session configuration. A model or effort change between completed turns keeps the native session. A failed configuration request does not send the user prompt or discard a resumable conversation.
 2. A cold session receives the current model-visible history from DotCraft, not the raw rollout. The first ACP prompt places role-tagged history before the current user input. Short history stays inline. The most recent complete message groups within the inline budget stay together, including each tool round. A line-indexed private file holds omitted groups for on-demand reading. Historical tool calls and results are evidence, not executable tool requests.
 3. Attachments that use private file references are granted exact read access for that run. The plugin does not authorize other local files or native tools.
-4. ACP updates and prompt results project to provider-neutral text, reasoning, usage and finish reasons. Usage comes from ACP prompt results, not context-window occupancy updates or estimates at tool boundaries. Cached input is included in total input tokens. The plugin reports native timing only when exactly one new generation record matches the reported usage. It does not infer timing from output arrival.
+4. ACP updates and prompt results project to provider-neutral text, reasoning, usage and finish reasons. Context occupancy uses the latest `usage_update.used` for the current session, independently of billing. Without a window update the host estimates context from history and never treats accumulated ACP billing as occupancy. Billing uses the prompt result and includes cached input. At tool boundaries the plugin can report completed native generations early. It deducts those counts from the prompt result so each generation is counted once, including across a Steer handover. Generation speed uses output tokens and their matching native streaming duration, not tool time, first-output wait or output arrival times. When no matching timing is available, the plugin reports only usage.
 5. When the model calls DotCraft tools, the MCP server holds the requests open, coalesces concurrent calls into a tool boundary, and returns their calls to DotCraft for approval and execution. The next sampling in the same turn returns matching results, including text, images and errors. The plugin grants ACP dispatch permission only for the declared loopback relay tools and explicitly authorized private file reads. Other permission requests are rejected.
 6. The backend advertises `ModelSteeringMode.AtNextBoundary`, so DotCraft delivers guidance without interrupting the active provider stream. If the ACP turn is waiting for tools, guidance is sent as an additional native prompt and the original tool results follow on MCP. Steer does not send `session/cancel`. At a completed answer boundary, new input is sent as the next prompt on the same session.
 

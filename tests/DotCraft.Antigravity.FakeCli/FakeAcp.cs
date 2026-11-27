@@ -288,6 +288,10 @@ internal sealed class FakeAcp(string[] args, string root, string cwd)
                 return;
             }
 
+            var reportContext = text.Contains("context-metrics", StringComparison.Ordinal);
+            if (reportContext)
+                Update(new { sessionUpdate = "usage_update", used = 0, size = 1_048_576 });
+
             string message;
             int inputTokens = prompt.Number == 1 ? 100 : 25;
             int cached = prompt.Number == 1 ? 0 : 90;
@@ -309,6 +313,8 @@ internal sealed class FakeAcp(string[] args, string root, string cwd)
             else if (text.Contains("parallel", StringComparison.Ordinal) && !text.Contains("\"Result\"", StringComparison.Ordinal) && _tools.Count >= 2)
             {
                 Text("Checking.");
+                if (reportContext)
+                    Update(new { sessionUpdate = "usage_update", used = 70, size = 1_048_576 });
                 var wrapped = text.Contains("wrapped-legacy", StringComparison.Ordinal);
                 var first = ToolAsync(0, "first", prompt.Stop.Token, wrapped);
                 var second = ToolAsync(1, "second", prompt.Stop.Token, wrapped);
@@ -336,6 +342,8 @@ internal sealed class FakeAcp(string[] args, string root, string cwd)
             }
 
             Text(message);
+            if (reportContext)
+                Update(new { sessionUpdate = "usage_update", used = 115, size = 1_048_576 });
             Finish(prompt, "end_turn", Usage(inputTokens, outputTokens, cached));
         }
         catch (OperationCanceledException) when (prompt.Stop.IsCancellationRequested)

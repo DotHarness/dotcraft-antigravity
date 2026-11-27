@@ -29,17 +29,11 @@ internal static class AntigravityRequestTiming
         }
     }
 
-    public static (long? Cursor, TokenUsageRequestTiming? Timing) ReadAfter(
-        string isolatedGeminiDir,
-        string sessionId,
-        long after,
-        long inputTokens,
-        long outputTokens,
-        long? reasoningTokens)
+    public static GenerationBatch? ReadAfter(string isolatedGeminiDir, string sessionId, long after)
     {
         var path = DatabasePath(isolatedGeminiDir, sessionId);
         if (path is null || !File.Exists(path))
-            return (null, null);
+            return null;
 
         try
         {
@@ -48,26 +42,40 @@ internal static class AntigravityRequestTiming
             using var query = connection.CreateCommand();
             query.CommandText = """
                 SELECT idx, CASE WHEN length(data) <= $maxBytes THEN data END
-                FROM gen_metadata WHERE idx > $after ORDER BY idx DESC LIMIT 2
+                FROM gen_metadata WHERE idx > $after ORDER BY idx
                 """;
             query.Parameters.AddWithValue("$after", after);
             query.Parameters.AddWithValue("$maxBytes", MaxRowBytes);
             using var rows = query.ExecuteReader();
-            if (!rows.Read())
-                return (null, null);
+            var count = 0;
+            var cursor = after;
+            var usage = new GenerationUsage();
+            var timed = true;
+            double firstMs = 0, generationMs = 0;
+            while (rows.Read())
+            {
+                if (rows.IsDBNull(1) || ReadGeneration(rows.GetFieldValue<byte[]>(1)) is not { } record)
+                    return null;
+                cursor = rows.GetInt64(0);
+                usage += record.Usage;
+                count++;
+                if (record.Timing is { } timing)
+                {
+                    firstMs += timing.FirstOutputLatencyMs;
+                    generationMs += timing.GenerationMs;
+                }
+                else
+                {
+                    timed = false;
+                }
+            }
 
-            var latest = rows.GetInt64(0);
-            var data = rows.IsDBNull(1) ? null : rows.GetFieldValue<byte[]>(1);
-            if (rows.Read() || data is null || outputTokens <= 0)
-                return (latest, null);
-
-            return TryMatch(data, inputTokens, outputTokens, reasoningTokens, out var timing)
-                ? (latest, timing)
-                : (latest, null);
+            return count == 0 ? null : new(cursor, usage,
+                timed ? new(firstMs / count, generationMs) : null);
         }
-        catch (Exception ex) when (ex is SqliteException or InvalidDataException or InvalidCastException)
+        catch (Exception ex) when (ex is SqliteException or InvalidDataException or InvalidCastException or OverflowException)
         {
-            return (null, null);
+            return null;
         }
     }
 
@@ -84,18 +92,15 @@ internal static class AntigravityRequestTiming
         DefaultTimeout = 1
     }.ToString();
 
-    private static bool TryMatch(
-        ReadOnlySpan<byte> record, long inputTokens, long outputTokens, long? reasoningTokens,
-        out TokenUsageRequestTiming? timing)
+    private static (GenerationUsage Usage, TokenUsageRequestTiming? Timing)? ReadGeneration(ReadOnlySpan<byte> record)
     {
-        timing = null;
         ReadOnlySpan<byte> model = default;
         var row = new ProtoReader(record);
         while (row.Next())
             if (row is { Field: 1, Wire: 2 })
                 model = row.Bytes;
-        if (model.IsEmpty) return false;
-        ulong input = 0, output = 0, reasoning = 0;
+        if (model.IsEmpty) return null;
+        GenerationUsage? usage = null;
         double? first = null, generation = null;
         var chat = new ProtoReader(model);
         while (chat.Next())
@@ -105,15 +110,7 @@ internal static class AntigravityRequestTiming
             switch (chat.Field)
             {
                 case 4:
-                    var usage = new ProtoReader(chat.Bytes);
-                    while (usage.Next())
-                    {
-                        if (usage.Wire != 0)
-                            continue;
-                        if (usage.Field == 2) input = usage.Number;
-                        if (usage.Field == 3) output = usage.Number;
-                        if (usage.Field == 9) reasoning = usage.Number;
-                    }
+                    usage = ReadUsage(chat.Bytes);
                     break;
                 case 11:
                     first = Milliseconds(chat.Bytes);
@@ -124,13 +121,46 @@ internal static class AntigravityRequestTiming
             }
         }
 
-        if (input != (ulong)inputTokens || output != (ulong)outputTokens
-            || (reasoningTokens is long reason && reasoning != (ulong)reason))
-            return false;
+        return usage is { HasBillableTokens: true } counts
+            ? (counts, first is double firstMs && generation is > 0 ? new(firstMs, generation.Value) : null)
+            : null;
+    }
 
-        if (first is double firstMs && generation is > 0)
-            timing = new(firstMs, generation.Value);
-        return true;
+    private static GenerationUsage ReadUsage(ReadOnlySpan<byte> payload)
+    {
+        long input = 0, output = 0, cachedRead = 0, cachedWrite = 0, reasoning = 0;
+        var usage = new ProtoReader(payload);
+        while (usage.Next())
+        {
+            if (usage.Wire != 0)
+                continue;
+            switch (usage.Field)
+            {
+                case 2: input = checked((long)usage.Number); break;
+                case 3: output = checked((long)usage.Number); break;
+                case 4: cachedWrite = checked((long)usage.Number); break;
+                case 5: cachedRead = checked((long)usage.Number); break;
+                case 9: reasoning = checked((long)usage.Number); break;
+            }
+        }
+
+        return new(input, output, cachedRead, Math.Min(cachedWrite, input), Math.Min(reasoning, output));
+    }
+
+    internal sealed record GenerationBatch(long Cursor, GenerationUsage Usage, TokenUsageRequestTiming? Timing);
+
+    internal readonly record struct GenerationUsage(long Input, long Output, long CachedRead, long CachedWrite, long Reasoning)
+    {
+        public bool HasBillableTokens => Input > 0 || Output > 0 || CachedRead > 0;
+
+        public static GenerationUsage operator +(GenerationUsage left, GenerationUsage right) =>
+            checked(new(left.Input + right.Input, left.Output + right.Output, left.CachedRead + right.CachedRead,
+                left.CachedWrite + right.CachedWrite, left.Reasoning + right.Reasoning));
+
+        public GenerationUsage RemainingAfter(GenerationUsage alreadyReported) =>
+            new(Math.Max(0, Input - alreadyReported.Input), Math.Max(0, Output - alreadyReported.Output),
+                Math.Max(0, CachedRead - alreadyReported.CachedRead), Math.Max(0, CachedWrite - alreadyReported.CachedWrite),
+                Math.Max(0, Reasoning - alreadyReported.Reasoning));
     }
 
     private static double? Milliseconds(ReadOnlySpan<byte> data)
