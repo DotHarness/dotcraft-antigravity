@@ -83,7 +83,9 @@ public sealed class BackendSamplingTests
 
         static void AssertContextOnly(UsageContent usage, long occupied)
         {
-            Assert.Equal(occupied, Assert.IsType<ProviderContextUsage>(ProviderContextUsage.TryGet(usage)).OccupiedTokens);
+            var measurement = Assert.IsType<ProviderContextUsage>(ProviderContextUsage.TryGet(usage));
+            Assert.Equal(occupied, measurement.OccupiedTokens);
+            Assert.Null(measurement.InputTokens);
             Assert.Equal(0L, usage.Details.InputTokenCount.GetValueOrDefault());
             Assert.Equal(0L, usage.Details.OutputTokenCount.GetValueOrDefault());
         }
