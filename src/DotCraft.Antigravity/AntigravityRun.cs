@@ -14,6 +14,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
     private readonly string? _configDirectory;
     private readonly string? _resumeId;
     private readonly TimeSpan _toolBatchWindow;
+    private readonly TimeProvider _clock;
     private readonly CancellationTokenSource _stopping;
     private readonly object _state = new();
     private readonly HashSet<string> _readPaths;
@@ -51,7 +52,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
 
     public AntigravityRun(
         AntigravitySettings settings, string root, AntigravityLimits limits, AntigravityRequest request,
-        CancellationToken stopping, ProviderConversationIdentity? identity, PrivateDirectory? existingDirectory = null,
+        CancellationToken stopping, ProviderConversationIdentity? identity, TimeProvider clock, PrivateDirectory? existingDirectory = null,
         string? resumeConversationId = null, IEnumerable<string>? existingMediaPaths = null,
         string? existingHandoffPath = null, string? configDirectory = null, TimeSpan? toolBatchWindow = null)
     {
@@ -59,6 +60,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
         _limits = limits;
         _request = request;
         _identity = identity;
+        _clock = clock;
         _resumeId = resumeConversationId;
         _stopping = CancellationTokenSource.CreateLinkedTokenSource(stopping);
         _directory = existingDirectory ?? PrivateDirectory.CreateRun(root);
@@ -486,14 +488,15 @@ internal sealed class AntigravityRun : IAsyncDisposable
 
     private async Task WatchAsync(CancellationToken ct)
     {
-        var started = DateTimeOffset.UtcNow;
+        var started = _clock.GetTimestamp();
+        var logStart = _clock.GetUtcNow();
         try
         {
-            using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(300));
+            using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(300), _clock);
             while (await timer.WaitForNextTickAsync(ct))
             {
-                var elapsed = DateTimeOffset.UtcNow - started;
-                var quota = elapsed >= TimeSpan.FromSeconds(1) ? AntigravityLimits.CheckEarlyQuotaLog(_geminiDir, started) : null;
+                var elapsed = _clock.GetElapsedTime(started);
+                var quota = elapsed >= TimeSpan.FromSeconds(1) ? AntigravityLimits.CheckEarlyQuotaLog(_geminiDir, logStart) : null;
                 var failure = quota is not null ? _limits.ClassifyAndRecordError(quota)
                     : elapsed >= TimeSpan.FromSeconds(_settings.RequestTimeoutSeconds)
                         ? new TimeoutException($"Antigravity.Timeout: The CLI produced no model output or tool activity in {_settings.RequestTimeoutSeconds}s.")

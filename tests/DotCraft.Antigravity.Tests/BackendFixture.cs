@@ -16,6 +16,7 @@ internal sealed class BackendFixture : IAsyncDisposable
     public EffectiveModelRuntime Runtime { get; private set; } = new("ag", "gemini-4-neon", "antigravity", "Antigravity", "", "", 30, null, new());
 
     private readonly AntigravitySettings _settings;
+    private readonly TimeProvider? _clock;
     private CancellationTokenSource _stopping = null!;
     private Task _supervisor = null!;
 
@@ -24,9 +25,10 @@ internal sealed class BackendFixture : IAsyncDisposable
         "fake-cli",
         "DotCraft.Antigravity.FakeCli" + (OperatingSystem.IsWindows() ? ".exe" : ""));
 
-    public BackendFixture(bool allowAiCredits = false, int idleTimeoutSeconds = 10, int requestTimeoutSeconds = 30)
+    public BackendFixture(bool allowAiCredits = false, int idleTimeoutSeconds = 10, int requestTimeoutSeconds = 30, TimeProvider? clock = null)
     {
         _settings = new AntigravitySettings(Executable, idleTimeoutSeconds, allowAiCredits, requestTimeoutSeconds);
+        _clock = clock;
         Start();
     }
 
@@ -38,6 +40,7 @@ internal sealed class BackendFixture : IAsyncDisposable
             _settings,
             Root,
             _stopping.Token,
+            clock: _clock,
             configDirectory: Root,
             toolBatchWindow: TimeSpan.FromMilliseconds(40));
         Provider = Backend.CreateProvider(new ModelBackendContext(Runtime, new UnusedCredentials(), _stopping.Token));

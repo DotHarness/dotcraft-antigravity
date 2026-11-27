@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.IO.Pipes;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -260,12 +261,24 @@ internal sealed class FakeAcp(string[] args, string root, string cwd)
                 await Task.Delay(Timeout.InfiniteTimeSpan, prompt.Stop.Token);
                 return;
             }
-            if (text is "hang" or "echo-only")
+            if (text == "hang")
             {
-                if (text == "hang")
-                    Text("ready");
-                else
-                    Update(new { sessionUpdate = "user_message_chunk", content = new { type = "text", text } });
+                Text("ready");
+                await Task.Delay(Timeout.InfiniteTimeSpan, prompt.Stop.Token);
+                return;
+            }
+            const string echo = "echo-only ";
+            if (text.StartsWith(echo, StringComparison.Ordinal))
+            {
+                Update(new { sessionUpdate = "user_message_chunk", content = new { type = "text", text } });
+                var replyId = "echo-barrier";
+                var reply = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _permissions[replyId] = reply;
+                // The host processes the echo before replying to this request.
+                Emit(new { jsonrpc = "2.0", id = replyId, method = "fixture/barrier" });
+                await reply.Task.WaitAsync(prompt.Stop.Token);
+                using var pipe = new NamedPipeClientStream(".", text[echo.Length..], PipeDirection.Out, PipeOptions.Asynchronous);
+                await pipe.ConnectAsync(prompt.Stop.Token);
                 await Task.Delay(Timeout.InfiniteTimeSpan, prompt.Stop.Token);
                 return;
             }

@@ -296,6 +296,7 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
                         request,
                         Stopping,
                         identity,
+                        _clock,
                         existingDirectory: directory,
                         resumeConversationId: checkpoint.ConversationId,
                         existingMediaPaths: media,
@@ -323,6 +324,7 @@ internal sealed class AntigravityBackend : IModelBackendSource, IModelBackend, I
             request,
             Stopping,
             identity,
+            _clock,
             configDirectory: _configDirectory,
             toolBatchWindow: _toolBatchWindow);
 

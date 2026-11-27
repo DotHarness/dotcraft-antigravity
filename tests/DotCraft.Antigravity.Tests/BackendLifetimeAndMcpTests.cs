@@ -1,3 +1,4 @@
+using System.IO.Pipes;
 using System.Net;
 using System.Net.Http.Json;
 using Microsoft.Extensions.AI;
@@ -53,15 +54,17 @@ public sealed class BackendLifetimeAndMcpTests
     [Fact]
     public async Task FirstOutputDisarmsTheStartupWatchdog()
     {
-        await using var fixture = new BackendFixture(requestTimeoutSeconds: 2);
-        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+        var clock = new WatchdogClock();
+        await using var fixture = new BackendFixture(clock: clock);
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         await using var updates = fixture.Client.GetStreamingResponseAsync([new(ChatRole.User, "hang")], cancellationToken: stop.Token)
             .GetAsyncEnumerator();
 
         Assert.True(await updates.MoveNextAsync());
         Assert.Equal("ready", updates.Current.Text);
 
-        stop.CancelAfter(TimeSpan.FromSeconds(3));
+        await clock.Stopped.WaitAsync(stop.Token);
+        await stop.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
         {
             while (await updates.MoveNextAsync()) { }
@@ -71,14 +74,18 @@ public sealed class BackendLifetimeAndMcpTests
     [Fact]
     public async Task UserEchoAloneDoesNotDisarmTheStartupWatchdog()
     {
-        await using var fixture = new BackendFixture(requestTimeoutSeconds: 2);
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+        var clock = new WatchdogClock();
+        await using var fixture = new BackendFixture(clock: clock);
+        var pipeName = $"agy-test-{Guid.NewGuid():N}";
+        using var echoed = new NamedPipeServerStream(pipeName, PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var response = fixture.Client.GetResponseAsync([new(ChatRole.User, $"echo-only {pipeName}")], cancellationToken: deadline.Token);
 
-        var error = await Assert.ThrowsAsync<TimeoutException>(() =>
-            fixture.Client.GetResponseAsync([new(ChatRole.User, "echo-only")], cancellationToken: deadline.Token));
+        await echoed.WaitForConnectionAsync(deadline.Token);
+        clock.Advance(TimeSpan.FromSeconds(31));
 
+        var error = await Assert.ThrowsAsync<TimeoutException>(() => response);
         Assert.StartsWith("Antigravity.Timeout:", error.Message);
-        Assert.Equal("echo-only", fixture.Capture.GetProperty("input").GetProperty("message").GetProperty("content").GetString());
     }
 
     [Fact]
@@ -127,5 +134,44 @@ public sealed class BackendLifetimeAndMcpTests
 
         Assert.Throws<InvalidDataException>(() => server.Complete("unknown", "nope"));
         await stopping.CancelAsync();
+    }
+
+    private sealed class WatchdogClock : TimeProvider
+    {
+        private readonly TaskCompletionSource _stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private Action? _tick;
+        private long _timestamp;
+
+        public Task Stopped => _stopped.Task;
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+        public override long GetTimestamp() => Interlocked.Read(ref _timestamp);
+
+        public void Advance(TimeSpan elapsed)
+        {
+            Interlocked.Add(ref _timestamp, elapsed.Ticks);
+            Volatile.Read(ref _tick)?.Invoke();
+        }
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            Volatile.Write(ref _tick, () => callback(state));
+            return new WatchdogTimer(this);
+        }
+
+        private sealed class WatchdogTimer(WatchdogClock clock) : ITimer
+        {
+            public bool Change(TimeSpan dueTime, TimeSpan period) => throw new NotSupportedException();
+            public void Dispose()
+            {
+                Volatile.Write(ref clock._tick, null);
+                clock._stopped.TrySetResult();
+            }
+
+            public ValueTask DisposeAsync()
+            {
+                Dispose();
+                return ValueTask.CompletedTask;
+            }
+        }
     }
 }
