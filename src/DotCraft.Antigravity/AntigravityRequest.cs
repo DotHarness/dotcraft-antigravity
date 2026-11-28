@@ -11,7 +11,7 @@ namespace DotCraft.Antigravity;
 
 internal sealed class AntigravityRequest
 {
-    public const string RelayAgentName = "dotcraft-relay";
+    public const string RulesFileName = "AGENTS.md";
 
     public EffectiveModelRuntime Runtime { get; }
     public ChatMessage[] Messages { get; }
@@ -52,33 +52,28 @@ internal sealed class AntigravityRequest
             .Where(t => !string.IsNullOrWhiteSpace(t)));
 
         History = Snapshot(Messages, reasoning: false);
-        ResumeFingerprint = new JsonArray(SystemPrompt, Tools.Schema, AllowAiCredits)
+        ResumeFingerprint = new JsonArray("default-agent", SystemPrompt, Tools.Schema, AllowAiCredits)
             .ToJsonString(AntigravityJson.Compact);
     }
 
-    public string BuildRelayAgentMarkdown(bool allowPrivateReads)
+    public string BuildRelayRulesMarkdown(bool allowPrivateReads)
     {
         var body = string.IsNullOrWhiteSpace(SystemPrompt)
             ? "You are a helpful assistant."
             : SystemPrompt;
+        var relay = new StringBuilder();
+        relay.AppendLine("# DotCraft model relay");
+        relay.AppendLine("You run as the model backend inside DotCraft, not as a standalone Antigravity CLI agent. The DotCraft instructions below take precedence over default CLI behavior.");
+        relay.AppendLine("- Your working directory is an empty private sandbox, not the user's repository. Never construct or cite file paths or links from this sandbox working directory. Use only paths provided in DotCraft instructions or tool results.");
         if (Tools.Count > 0)
-            body += "\n\nUse the exposed mcp_dotcraft_<tool> tools directly when available.";
+            relay.AppendLine("- For every action in the user's workspace, use only the exposed `mcp_dotcraft_<tool>` tools or `call_mcp_tool` targeting `dotcraft`. Do not invoke built-in Antigravity tools.");
+        else
+            relay.AppendLine("- Do not invoke any built-in Antigravity tools. Answer directly with text.");
         if (allowPrivateReads)
-            body += "\n\nThe one exception to the built-in tool restriction is viewing explicitly provided private attachments or conversation evidence.";
-
-        return $"""
-            ---
-            name: {RelayAgentName}
-            description: DotCraft model relay
-            mainAgent: true
-            subagent: false
-            excludeDefaultComponents: true
-            inheritCustomizations: {(Tools.Count > 0 || allowPrivateReads ? "true" : "false")}
-            tools: {(allowPrivateReads ? "[view_file]" : "[]")}
-            ---
-
-            {body}
-            """;
+            relay.AppendLine("- The one exception to the built-in tool restriction is reading explicitly provided private attachments or conversation handoff files with `read_file` or `view_file`.");
+        relay.AppendLine();
+        relay.Append(body);
+        return relay.ToString();
     }
 
     public Task<(string Text, List<string> MediaPaths, string? HandoffPath)> BuildColdInputAsync(

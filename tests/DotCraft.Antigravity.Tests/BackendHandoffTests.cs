@@ -107,7 +107,8 @@ public sealed class BackendHandoffTests
         var expectedRules = new[] { $"read_file({exactPath})", $"view_file({exactPath})" };
         Assert.All(readRules, rule => Assert.Contains(rule, expectedRules));
 
-        var agent = capture.GetProperty("agentMarkdown").GetString()!;
-        Assert.Matches(@"(?m)^tools:[ \t]*(?:\[[ \t]*view_file[ \t]*\]|\r?\n[ \t]*-[ \t]+view_file)[ \t]*\r?$", agent);
+        Assert.False(capture.GetProperty("hasCustomAgents").GetBoolean());
+        var rules = capture.GetProperty("rulesMarkdown").GetString()!;
+        Assert.Contains("private attachments or conversation handoff files", rules);
     }
 }

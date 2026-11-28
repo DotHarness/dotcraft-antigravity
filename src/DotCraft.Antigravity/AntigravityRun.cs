@@ -89,9 +89,11 @@ internal sealed class AntigravityRun : IAsyncDisposable, IAcpClientHandler
         (_home, _geminiDir) = await AntigravityEnvironment.PrepareIsolatedHomeAsync(
             directory, _settings.AllowAiCredits, _readPaths, ct, _configDirectory);
         var work = directory.EnsureSubdirectory("work");
-        await directory.WriteAsync(Path.Combine("work", ".agents", "agents", AntigravityRequest.RelayAgentName, "agent.md"),
-            _request.BuildRelayAgentMarkdown(_readPaths.Count > 0), ct);
-        File.Delete(Path.Combine(work, ".agents", "mcp_config.json"));
+        await directory.WriteAsync(Path.Combine("work", AntigravityRequest.RulesFileName),
+            _request.BuildRelayRulesMarkdown(_readPaths.Count > 0), ct);
+        var staleAgents = Path.Combine(work, ".agents");
+        if (Directory.Exists(staleAgents))
+            Directory.Delete(staleAgents, recursive: true);
 
         if (_request.Tools.Count > 0)
         {
@@ -101,7 +103,7 @@ internal sealed class AntigravityRun : IAsyncDisposable, IAcpClientHandler
 
         var env = AntigravityEnvironment.BuildChildEnvironment(_home, explicitConfigDir: _configDirectory);
         env.Remove("ANTIGRAVITY_CONFIG_DIR");
-        _process = new(exe, work, ["acp", "--process-per-session", "--agent", AntigravityRequest.RelayAgentName], env, pidFileDirectory: directory.Path);
+        _process = new(exe, work, ["acp", "--process-per-session"], env, pidFileDirectory: directory.Path);
         _client = new AcpV1Client(
             new AntigravityAcpTransport(_process),
             this,

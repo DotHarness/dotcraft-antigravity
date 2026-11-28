@@ -38,7 +38,9 @@ internal sealed class AntigravitySessions(string root, TimeProvider clock)
         try
         {
             AntigravityEnvironment.RemoveIsolatedTokens(directory.Path);
-            File.Delete(Path.Combine(directory.Path, "work", ".agents", "mcp_config.json"));
+            var mcpConfig = Path.Combine(directory.Path, "work", ".agents", "mcp_config.json");
+            if (File.Exists(mcpConfig))
+                File.Delete(mcpConfig);
             var saved = new SavedAntigravitySession(key, clock.GetUtcNow(), checkpoint);
             var json = JsonSerializer.Serialize(saved, AntigravitySessionJson.Default.SavedAntigravitySession);
             await directory.WriteAtomicAsync(CheckpointFile, json, CancellationToken.None);

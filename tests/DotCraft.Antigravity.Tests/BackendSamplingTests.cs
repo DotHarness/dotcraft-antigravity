@@ -181,13 +181,12 @@ public sealed class BackendSamplingTests
             await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
 
             var capture = fixture.Capture;
-            var agentMd = capture.GetProperty("agentMarkdown").GetString()!;
-            Assert.Contains("excludeDefaultComponents: true", agentMd);
-            Assert.Contains("tools: []", agentMd);
-            Assert.Contains("dotcraft instructions", agentMd);
-            Assert.Contains("workspace instructions", agentMd);
-            Assert.Contains("developer instructions", agentMd);
-            Assert.Contains("You must call the Inspect tool", agentMd);
+            var rulesMd = capture.GetProperty("rulesMarkdown").GetString()!;
+            Assert.False(capture.GetProperty("hasCustomAgents").GetBoolean());
+            Assert.Contains("dotcraft instructions", rulesMd);
+            Assert.Contains("workspace instructions", rulesMd);
+            Assert.Contains("developer instructions", rulesMd);
+            Assert.Contains("You must call the Inspect tool", rulesMd);
 
             var settings = capture.GetProperty("settings");
             Assert.True(settings.GetProperty("useG1Credits").GetBoolean());
@@ -214,9 +213,9 @@ public sealed class BackendSamplingTests
             var args = capture.GetProperty("args").EnumerateArray().Select(a => a.GetString()).ToArray();
             Assert.Equal("acp", args[0]);
             Assert.Contains("--process-per-session", args);
+            Assert.DoesNotContain("--agent", args);
             Assert.Equal(1, capture.GetProperty("mcpServerCount").GetInt32());
             Assert.False(File.Exists(Path.Combine(capture.GetProperty("cwd").GetString()!, ".agents", "mcp_config.json")));
-            Assert.Equal("dotcraft-relay", args[Array.IndexOf(args, "--agent") + 1]);
             Assert.DoesNotContain("--dangerously-skip-permissions", args);
             var childEnv = AntigravityEnvironment.BuildChildEnvironment(fixture.Root);
             Assert.Contains("127.0.0.1", childEnv["NO_PROXY"].Split(','));

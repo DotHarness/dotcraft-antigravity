@@ -195,14 +195,15 @@ internal sealed class FakeAcp(string[] args, string root, string cwd)
 
             var number = ++_promptCount;
             var settingsPath = Path.Combine(GeminiDir, "settings.json");
-            var agentPath = Path.Combine(cwd, ".agents", "agents", "dotcraft-relay", "agent.md");
+            var rulesPath = Path.Combine(cwd, "AGENTS.md");
             var capture = new
             {
                 pid = _pid, args, cwd, home = _home, resume = _resume, conversationId = _conversation,
                 model = _model, effort = _model.StartsWith("claude", StringComparison.Ordinal) ? null : _effort,
                 mcpServerCount = _serverCount,
                 settings = File.Exists(settingsPath) ? JsonNode.Parse(File.ReadAllText(settingsPath)) : new JsonObject(),
-                agentMarkdown = File.Exists(agentPath) ? File.ReadAllText(agentPath) : "",
+                rulesMarkdown = File.Exists(rulesPath) ? File.ReadAllText(rulesPath) : "",
+                hasCustomAgents = Directory.Exists(Path.Combine(cwd, ".agents", "agents")),
                 input = new { message = new { content = text }, blocks },
                 disableAutoUpdate = Environment.GetEnvironmentVariable("AGY_CLI_DISABLE_AUTO_UPDATE"),
                 leakedSecret = Environment.GetEnvironmentVariable("FAKE_HOST_API_KEY")
