@@ -1,5 +1,5 @@
 using System.Text.Json;
-using System.Text.Json.Nodes;
+using DotHarness.Acp.V1;
 using Microsoft.Extensions.AI;
 using Xunit;
 
@@ -79,11 +79,12 @@ public sealed class BackendHandoffTests
         var path = Path.Combine(Path.GetTempPath(), "handoff.txt");
         var paths = new HashSet<string> { path };
         var tools = new AntigravityTools([]);
-        JsonObject ReadStep(string target) => new()
+        ToolCall ReadStep(string target) => new()
         {
-            ["name"] = "read_file",
-            ["title"] = "File " + Path.GetFileName(path),
-            ["rawInput"] = new JsonObject { ["Path"] = target }
+            ToolCallId = "read-1",
+            Name = "read_file",
+            Title = "File " + Path.GetFileName(path),
+            RawInput = JsonSerializer.SerializeToElement(new { Path = target })
         };
 
         Assert.True(AntigravityAcpToolPolicy.Allows(ReadStep(path), tools, paths));

@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Text;
-using System.Text.Json.Nodes;
 
 namespace DotCraft.Antigravity;
 
@@ -83,13 +82,6 @@ internal sealed class AntigravityProcess : IAsyncDisposable
         {
             lock (_stderrLock) return _stderr.ToString();
         }
-    }
-
-    public async Task WriteJsonLineAsync(JsonObject message, CancellationToken ct)
-    {
-        var line = message.ToJsonString(AntigravityJson.Compact);
-        await Input.WriteLineAsync(line.AsMemory(), ct);
-        await Input.FlushAsync(ct);
     }
 
     public async Task<int> ExitAsync(CancellationToken ct)

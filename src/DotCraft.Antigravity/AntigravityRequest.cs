@@ -226,7 +226,7 @@ internal sealed class AntigravityRequest
         return (string.Join("\n\n", parts), mediaPaths);
     }
 
-    public bool TryBuildSteerPrompt(ReadOnlySpan<JsonNode?> trailing, out JsonArray? guidance)
+    public bool TryBuildSteerPrompt(ReadOnlySpan<JsonNode?> trailing, out DotHarness.Acp.V1.ContentBlock[]? guidance)
     {
         guidance = null;
         if (trailing.IsEmpty)
@@ -239,8 +239,9 @@ internal sealed class AntigravityRequest
         }
 
         var messages = Messages.Reverse().TakeWhile(message => message.Role == ChatRole.User).Reverse();
-        guidance = new JsonArray(messages.SelectMany(message => message.Contents.OfType<TextContent>())
-            .Select(content => (JsonNode?)AntigravityAcpSession.TextBlock(content.Text)).ToArray());
+        guidance = messages.SelectMany(message => message.Contents.OfType<TextContent>())
+            .Select(content => DotHarness.Acp.V1.ContentBlock.FromText(content.Text))
+            .ToArray();
         return true;
     }
 

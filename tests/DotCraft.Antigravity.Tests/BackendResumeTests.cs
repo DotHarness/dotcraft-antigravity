@@ -2,6 +2,7 @@ using System.Text.Json;
 using DotCraft.Agents;
 using DotCraft.Contributions;
 using DotCraft.Sessions;
+using DotHarness.Acp.Rpc;
 using Microsoft.Extensions.AI;
 using Xunit;
 
@@ -121,7 +122,7 @@ public sealed class BackendResumeTests
 
         var denial = Path.Combine(fixture.Root, "fake-reject-effort");
         await File.WriteAllTextAsync(denial, "", deadline.Token);
-        var error = await Assert.ThrowsAsync<AntigravityAcpException>(() => SampleAsync("gemini-3.8-flash", "Medium"));
+        var error = await Assert.ThrowsAsync<AcpRpcException>(() => SampleAsync("gemini-3.8-flash", "Medium"));
         Assert.Equal(-32602, error.Code);
         var rejected = Assert.Single(fixture.Files("rejected-effort-*.json"));
         Assert.Equal("gemini-3.8-flash", rejected.GetProperty("model").GetString());

@@ -1,4 +1,5 @@
-using System.Text.Json.Nodes;
+using System.Text.Json;
+using DotHarness.Acp.V1;
 
 namespace DotCraft.Antigravity;
 
@@ -6,26 +7,42 @@ internal sealed class NativeToolBlockedException(string message) : InvalidOperat
 
 internal static class AntigravityAcpToolPolicy
 {
-    public static bool Allows(JsonObject tool, AntigravityTools tools, IReadOnlySet<string> allowedPaths)
+    public static bool Allows(ToolCall tool, AntigravityTools tools, IReadOnlySet<string> allowedPaths) =>
+        Allows(tool.Name.GetValueOrDefault(), tool.Title, tool.RawInput.GetValueOrDefault(), tool.ExtensionData, tools, allowedPaths);
+
+    public static bool Allows(ToolCallUpdate tool, AntigravityTools tools, IReadOnlySet<string> allowedPaths) =>
+        Allows(tool.Name.GetValueOrDefault(), tool.Title.GetValueOrDefault(), tool.RawInput.GetValueOrDefault(), tool.ExtensionData, tools, allowedPaths);
+
+    private static bool Allows(
+        string? name,
+        string? title,
+        JsonElement rawInput,
+        Dictionary<string, JsonElement>? extensionData,
+        AntigravityTools tools,
+        IReadOnlySet<string> allowedPaths)
     {
         const string prefix = "mcp_dotcraft_";
-        var name = tool["name"]?.GetValue<string>();
-        var title = tool["title"]?.GetValue<string>();
         if (name is null && title?.StartsWith("Run ", StringComparison.Ordinal) == true)
             name = title[4..];
         if (name?.StartsWith(prefix, StringComparison.Ordinal) == true)
             return tools.Contains(name[prefix.Length..]);
 
-        var input = tool["rawInput"] as JsonObject ?? tool["args"] as JsonObject;
-        if (input is null) return false;
+        JsonElement input;
+        if (rawInput.ValueKind == JsonValueKind.Object)
+            input = rawInput;
+        else if (extensionData is not null && extensionData.TryGetValue("args", out var args) && args.ValueKind == JsonValueKind.Object)
+            input = args;
+        else
+            return false;
+
         if (name == "call_mcp_tool")
         {
-            var server = (input["ServerName"] ?? input["serverName"] ?? input["server_name"])?.GetValue<string>();
-            var target = (input["ToolName"] ?? input["toolName"] ?? input["tool_name"])?.GetValue<string>();
+            var server = StringProperty(input, "ServerName", "serverName", "server_name");
+            var target = StringProperty(input, "ToolName", "toolName", "tool_name");
             return server == AntigravityTools.ServerName && target is not null && tools.Contains(target);
         }
         if (name is not ("read_file" or "view_file")) return false;
-        var path = (input["Path"] ?? input["path"])?.GetValue<string>();
+        var path = StringProperty(input, "Path", "path");
         if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
             return false;
         try
@@ -36,5 +53,15 @@ internal static class AntigravityAcpToolPolicy
         {
             return false;
         }
+    }
+
+    private static string? StringProperty(JsonElement obj, params ReadOnlySpan<string> names)
+    {
+        foreach (var name in names)
+        {
+            if (obj.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String)
+                return value.GetString();
+        }
+        return null;
     }
 }

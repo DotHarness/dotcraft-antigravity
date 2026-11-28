@@ -1,42 +1,64 @@
-using System.Text.Json.Nodes;
+using System.Text.Json;
+using DotHarness.Acp.V1;
 
 namespace DotCraft.Antigravity;
 
-internal sealed class AntigravityAcpSession(AntigravityAcpConnection connection)
+internal sealed class AntigravityAcpSession(AcpV1Client client)
 {
-    private JsonArray _config = [];
+    private static readonly string ClientVersion =
+        typeof(AntigravityAcpSession).Assembly.GetName().Version?.ToString(3) ?? "1.0.0";
+
+    private SessionConfigOption[] _config = [];
 
     public string Id { get; private set; } = "";
-    public bool IsOpen => Id.Length > 0 && !connection.Completion.IsCompleted;
+    public bool IsOpen => Id.Length > 0 && !client.Connection.Completion.IsCompleted;
 
-    public async Task OpenAsync(string workingDirectory, JsonArray servers, string? resumeId, CancellationToken ct)
+    public async Task OpenAsync(string workingDirectory, McpServer[] servers, string? resumeId, CancellationToken ct)
     {
-        var init = await connection.SendRequestAsync("initialize", new()
+        var init = await client.InitializeAsync(new InitializeRequest
         {
-            ["protocolVersion"] = 1,
-            ["clientCapabilities"] = new JsonObject(),
-            ["clientInfo"] = new JsonObject { ["name"] = "dotcraft" }
+            ProtocolVersion = 1,
+            ClientCapabilities = new ClientCapabilities(),
+            ClientInfo = new Implementation { Name = "dotcraft", Version = ClientVersion }
         }, ct);
-        var capabilities = init["agentCapabilities"];
-        if (init["protocolVersion"]?.GetValue<int>() != 1
-            || (servers.Count > 0 && capabilities?["mcpCapabilities"]?["http"]?.GetValue<bool>() != true))
+        var capabilities = init.AgentCapabilities.GetValueOrDefault();
+        if (servers.Length > 0 && capabilities?.McpCapabilities.GetValueOrDefault()?.Http.GetValueOrDefault() != true)
             throw new InvalidDataException("Antigravity.AcpCapabilities: The CLI does not support the required ACP capabilities.");
 
         // ACP resume does not restore the relay from the working directory's MCP configuration.
-        var input = new JsonObject { ["cwd"] = workingDirectory, ["mcpServers"] = servers };
         if (resumeId is not null)
         {
-            if ((capabilities?["sessionCapabilities"] as JsonObject)?.ContainsKey("resume") != true)
+            if (capabilities?.SessionCapabilities.GetValueOrDefault()?.Resume.GetValueOrDefault() is null)
                 throw new InvalidDataException("Antigravity.AcpResumeUnsupported: The CLI does not support ACP resume.");
-            input["sessionId"] = resumeId;
-        }
 
-        var opened = await connection.SendRequestAsync(resumeId is null ? "session/new" : "session/resume", input, ct);
-        var returnedId = opened["sessionId"]?.GetValue<string>();
-        if (resumeId is not null && returnedId is not null && returnedId != resumeId)
-            throw new InvalidDataException("Antigravity.ResumeMismatch: The CLI opened a different conversation.");
-        Id = returnedId ?? resumeId ?? throw new InvalidDataException("Antigravity.MissingSession: The CLI did not return a session ID.");
-        _config = opened["configOptions"] as JsonArray ?? [];
+            var resumed = await client.Agent.SessionResumeAsync(new ResumeSessionRequest
+            {
+                SessionId = resumeId,
+                Cwd = workingDirectory,
+                McpServers = servers
+            }, ct);
+            var returnedId = resumed.ExtensionData is not null
+                && resumed.ExtensionData.TryGetValue("sessionId", out var sid)
+                && sid.ValueKind == JsonValueKind.String
+                ? sid.GetString()
+                : null;
+            if (returnedId is not null && returnedId != resumeId)
+                throw new InvalidDataException("Antigravity.ResumeMismatch: The CLI opened a different conversation.");
+            Id = returnedId ?? resumeId;
+            _config = resumed.ConfigOptions.GetValueOrDefault() ?? [];
+        }
+        else
+        {
+            var created = await client.Agent.SessionNewAsync(new NewSessionRequest
+            {
+                Cwd = workingDirectory,
+                McpServers = servers
+            }, ct);
+            if (string.IsNullOrEmpty(created.SessionId.Value))
+                throw new InvalidDataException("Antigravity.MissingSession: The CLI did not return a session ID.");
+            Id = created.SessionId.Value;
+            _config = created.ConfigOptions.GetValueOrDefault() ?? [];
+        }
     }
 
     public async Task SelectModelAsync(AntigravityRequest request, CancellationToken ct)
@@ -58,50 +80,48 @@ internal sealed class AntigravityAcpSession(AntigravityAcpConnection connection)
         }
     }
 
-    public Task<JsonObject> PromptAsync(JsonArray content, CancellationToken ct) =>
-        connection.SendRequestAsync("session/prompt", new() { ["sessionId"] = Id, ["prompt"] = content }, ct);
+    public Task<PromptResponse> PromptAsync(ContentBlock[] content, CancellationToken ct) =>
+        client.Agent.SessionPromptAsync(new PromptRequest { SessionId = Id, Prompt = content }, ct);
 
     public Task CancelAsync(CancellationToken ct) =>
-        connection.SendNotificationAsync("session/cancel", new() { ["sessionId"] = Id }, ct);
+        client.Agent.SessionCancelAsync(new CancelNotification { SessionId = Id }, ct);
 
-    public static JsonObject TextBlock(string text) => new() { ["type"] = "text", ["text"] = text };
+    public static ContentBlock[] TextPrompt(string text) => [ContentBlock.FromText(text)];
 
-    public static JsonArray TextPrompt(string text) => new(TextBlock(text));
-
-    public static JsonArray McpServers(AntigravityMcpServer? mcp)
-    {
-        if (mcp is null) return [];
-        return new(new JsonObject
-        {
-            ["type"] = "http",
-            ["name"] = AntigravityTools.ServerName,
-            ["url"] = mcp.Address,
-            ["headers"] = new JsonArray(new JsonObject
+    public static McpServer[] McpServers(AntigravityMcpServer? mcp) =>
+        mcp is null ? [] :
+        [
+            new McpServerHttp
             {
-                ["name"] = "Authorization",
-                ["value"] = mcp.AuthorizationHeader
-            })
-        });
-    }
+                Name = AntigravityTools.ServerName,
+                Url = mcp.Address,
+                Headers = [new HttpHeader { Name = "Authorization", Value = mcp.AuthorizationHeader }]
+            }
+        ];
 
-    private JsonObject? Option(string category) => _config.OfType<JsonObject>()
-        .FirstOrDefault(option => option["category"]?.GetValue<string>() == category || option["id"]?.GetValue<string>() == category);
+    private SessionConfigOptionSelectPayload? Option(string category) =>
+        _config.OfType<SessionConfigOption.Select>()
+            .Select(option => option.Value)
+            .FirstOrDefault(option =>
+                option.Category.GetValueOrDefault()?.Value == category || option.Id.Value == category);
 
-    private static IEnumerable<string> Values(JsonObject option) =>
-        (option["options"] as JsonArray ?? []).OfType<JsonObject>()
-            .SelectMany(item => item["options"] is JsonArray group ? group.OfType<JsonObject>() : [item])
-            .Select(item => item["value"]?.GetValue<string>()).OfType<string>();
-
-    private async Task SetOptionAsync(JsonObject option, string value, CancellationToken ct)
-    {
-        if (option["currentValue"]?.GetValue<string>() == value) return;
-        var result = await connection.SendRequestAsync("session/set_config_option", new()
+    private static IEnumerable<string> Values(SessionConfigOptionSelectPayload option) =>
+        option.Options switch
         {
-            ["sessionId"] = Id,
-            ["configId"] = option["id"]?.GetValue<string>(),
-            ["value"] = value
+            SessionConfigSelectOptions.Ungrouped flat => flat.Value.Select(item => item.Value.Value),
+            SessionConfigSelectOptions.Grouped grouped => grouped.Value.SelectMany(group => group.Options).Select(item => item.Value.Value),
+            _ => []
+        };
+
+    private async Task SetOptionAsync(SessionConfigOptionSelectPayload option, string value, CancellationToken ct)
+    {
+        if (option.CurrentValue.Value == value) return;
+        var result = await client.Agent.SessionSetConfigOptionAsync(new SetSessionConfigOptionRequestValueIdPayload
+        {
+            SessionId = Id,
+            ConfigId = option.Id,
+            Value = value
         }, ct);
-        if (result["configOptions"] is JsonArray updated)
-            _config = updated;
+        _config = result.ConfigOptions;
     }
 }

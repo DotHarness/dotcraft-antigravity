@@ -1,5 +1,6 @@
-using System.Text.Json.Nodes;
+using System.Text.Json;
 using DotCraft.Tracing;
+using DotHarness.Acp.V1;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.AI;
 using Xunit;
@@ -92,16 +93,20 @@ public sealed class BackendTimingTests
         }
     }
 
-    private static JsonObject PromptResult(long input = 65, long output = 35, long cachedRead = 190, long cachedWrite = 11, long thought = 8) =>
+    private static PromptResponse PromptResult(long input = 65, long output = 35, long cachedRead = 190, long cachedWrite = 11, long thought = 8) =>
         new()
         {
-            ["usage"] = new JsonObject
+            StopReason = StopReason.EndTurn,
+            ExtensionData = new()
             {
-                ["inputTokens"] = input,
-                ["outputTokens"] = output,
-                ["cachedReadTokens"] = cachedRead,
-                ["cachedWriteTokens"] = cachedWrite,
-                ["thoughtTokens"] = thought,
+                ["usage"] = JsonSerializer.SerializeToElement(new
+                {
+                    inputTokens = input,
+                    outputTokens = output,
+                    cachedReadTokens = cachedRead,
+                    cachedWriteTokens = cachedWrite,
+                    thoughtTokens = thought
+                })
             }
         };
 

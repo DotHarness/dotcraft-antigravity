@@ -1,11 +1,15 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
 using DotCraft.Agents;
+using DotHarness.Acp.Rpc;
+using DotHarness.Acp.V1;
 using Microsoft.Extensions.AI;
+using TextContent = Microsoft.Extensions.AI.TextContent;
 
 namespace DotCraft.Antigravity;
 
-internal sealed class AntigravityRun : IAsyncDisposable
+internal sealed class AntigravityRun : IAsyncDisposable, IAcpClientHandler
 {
     public static readonly TimeSpan DefaultToolBatchWindow = TimeSpan.FromMilliseconds(35);
 
@@ -25,7 +29,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
     private string _home = "";
     private AntigravityMcpServer? _mcp;
     private AntigravityProcess? _process;
-    private AntigravityAcpConnection? _connection;
+    private AcpV1Client? _client;
     private AntigravityAcpSession? _session;
     private AntigravityRequest _request;
     private ProviderConversationIdentity? _identity;
@@ -98,8 +102,15 @@ internal sealed class AntigravityRun : IAsyncDisposable
         var env = AntigravityEnvironment.BuildChildEnvironment(_home, explicitConfigDir: _configDirectory);
         env.Remove("ANTIGRAVITY_CONFIG_DIR");
         _process = new(exe, work, ["acp", "--process-per-session", "--agent", AntigravityRequest.RelayAgentName], env, pidFileDirectory: directory.Path);
-        _connection = new(_process, OnAcpMessageAsync, _stopping.Token);
-        _session = new(_connection);
+        _client = new AcpV1Client(
+            new AntigravityAcpTransport(_process),
+            this,
+            options: new AcpConnectionOptions
+            {
+                OrderHandlerAdmission = true,
+                NotificationError = OnNotificationError
+            });
+        _session = new(_client);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(TimeSpan.FromSeconds(_settings.RequestTimeoutSeconds));
         try
@@ -111,13 +122,13 @@ internal sealed class AntigravityRun : IAsyncDisposable
         {
             throw new TimeoutException("Antigravity.Timeout: The CLI did not open the ACP session.");
         }
-        catch (Exception ex) when (_resumeId is not null && ex is IOException or InvalidDataException)
+        catch (Exception ex) when (_resumeId is not null && ex is IOException or InvalidDataException or AcpRpcException or JsonException)
         {
             var classified = Classify(ex);
             if (classified is ProviderFailureException) throw classified;
             return false;
         }
-        catch (Exception ex) when (ex is IOException)
+        catch (Exception ex) when (ex is IOException or AcpRpcException or JsonException)
         {
             throw Classify(ex);
         }
@@ -157,7 +168,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
             if (results.Length != callIds.Length || !callIds.ToHashSet(StringComparer.Ordinal).SetEquals(results.Select(r => r.CallId)))
                 return ResumeOutcome.Incompatible;
 
-            Task<JsonObject>? superseded = null;
+            Task<PromptResponse>? superseded = null;
             lock (_state)
             {
                 if (!IsWaiting || _turn != pending) return ResumeOutcome.Incompatible;
@@ -173,7 +184,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
             if (superseded is not null)
             {
                 var reply = await superseded.WaitAsync(TimeSpan.FromSeconds(_settings.RequestTimeoutSeconds), ct);
-                if (reply["stopReason"]?.GetValue<string>() != "end_turn")
+                if (reply.StopReason != StopReason.EndTurn)
                     throw new InvalidDataException("Antigravity.SteerNotDelivered: The CLI did not hand over the active prompt.");
                 lock (_state) WriteUsageLocked(pending, reply);
             }
@@ -224,7 +235,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
     public async Task<bool> CancelTurnAsync(TimeSpan timeout)
     {
         PromptTurn? turn;
-        Task<JsonObject>? reply;
+        Task<PromptResponse>? reply;
         lock (_state)
         {
             turn = _turn;
@@ -250,10 +261,13 @@ internal sealed class AntigravityRun : IAsyncDisposable
                 if (!reply.IsCompleted)
                     await _session!.CancelAsync(deadline.Token).WaitAsync(deadline.Token);
                 var result = await reply.WaitAsync(deadline.Token);
-                if (result["stopReason"]?.GetValue<string>() is not ("cancelled" or "end_turn" or "max_tokens" or "refusal"))
+                if (result.StopReason != StopReason.Cancelled
+                    && result.StopReason != StopReason.EndTurn
+                    && result.StopReason != StopReason.MaxTokens
+                    && result.StopReason != StopReason.Refusal)
                     return false;
             }
-            catch (Exception ex) when (ex is OperationCanceledException or IOException or InvalidDataException or InvalidOperationException)
+            catch (Exception ex) when (ex is OperationCanceledException or IOException or InvalidDataException or InvalidOperationException or AcpRpcException or JsonException)
             {
                 return false;
             }
@@ -322,21 +336,21 @@ internal sealed class AntigravityRun : IAsyncDisposable
         _output = NewChannel();
     }
 
-    private void StartPromptLocked(JsonArray blocks)
+    private void StartPromptLocked(ContentBlock[] blocks)
     {
         _turn = new(_request, new(_geminiDir, _session!.Id));
         SendPromptLocked(_turn, blocks);
         StartWatchdogLocked();
     }
 
-    private void SendPromptLocked(PromptTurn turn, JsonArray blocks)
+    private void SendPromptLocked(PromptTurn turn, ContentBlock[] blocks)
     {
         var reply = _session!.PromptAsync(blocks, _stopping.Token);
         turn.Reply = reply;
         _ = ObservePromptAsync(turn, reply);
     }
 
-    private async Task ObservePromptAsync(PromptTurn turn, Task<JsonObject> reply)
+    private async Task ObservePromptAsync(PromptTurn turn, Task<PromptResponse> reply)
     {
         try
         {
@@ -346,14 +360,13 @@ internal sealed class AntigravityRun : IAsyncDisposable
                 if (turn != _turn || reply != turn.Reply || turn.Stopping) return;
                 StopTimersLocked();
                 WriteUsageLocked(turn, result);
-                var reason = result["stopReason"]?.GetValue<string>();
-                var finish = reason switch
-                {
-                    "end_turn" or "refusal" => ChatFinishReason.Stop,
-                    "max_tokens" or "max_turn_requests" => ChatFinishReason.Length,
-                    _ => throw new InvalidDataException($"Antigravity.AcpPromptFailed: Unexpected stop reason '{reason}'.")
-                };
-                if (!turn.SawText && !turn.SawTools && reason == "end_turn")
+                var reason = result.StopReason;
+                var finish = reason == StopReason.EndTurn || reason == StopReason.Refusal
+                    ? ChatFinishReason.Stop
+                    : reason == StopReason.MaxTokens || reason == StopReason.MaxTurnRequests
+                        ? ChatFinishReason.Length
+                        : throw new InvalidDataException($"Antigravity.AcpPromptFailed: Unexpected stop reason '{reason.Value}'.");
+                if (!turn.SawText && !turn.SawTools && reason == StopReason.EndTurn)
                     throw new InvalidDataException("Antigravity.EmptyResponse: The CLI finished without a response.");
                 _expected = SnapshotWithAssistant(_turnContents);
                 turn.Accepted = true;
@@ -372,80 +385,94 @@ internal sealed class AntigravityRun : IAsyncDisposable
         }
     }
 
-    private void WriteUsageLocked(PromptTurn turn, JsonObject result)
+    private void WriteUsageLocked(PromptTurn turn, PromptResponse result)
     {
         if (turn.Usage.ReadResult(result) is { } usage)
             _output.Writer.TryWrite(Update([usage]));
     }
 
-    private async Task OnAcpMessageAsync(JsonObject message)
+    ValueTask<RequestPermissionResponse> IAcpClientHandler.SessionRequestPermissionAsync(
+        RequestPermissionRequest parameters, CancellationToken ct)
     {
-        var method = message["method"]?.GetValue<string>();
-        var args = message["params"];
-        if (message["id"] is { } id)
+        bool approved;
+        lock (_state)
+            approved = _turn is { Stopping: false }
+                && parameters.SessionId.Value == _session?.Id
+                && AntigravityAcpToolPolicy.Allows(parameters.ToolCall, _request.Tools, _readPaths);
+        var allow = approved
+            ? parameters.Options.FirstOrDefault(option => option.Kind == PermissionOptionKind.AllowOnce)?.OptionId
+            : null;
+        return ValueTask.FromResult(new RequestPermissionResponse
         {
-            if (method == "session/request_permission")
-            {
-                bool approved;
-                lock (_state) approved = _turn is { Stopping: false } && args?["sessionId"]?.GetValue<string>() == _session?.Id
-                    && args?["toolCall"] is JsonObject tool && AntigravityAcpToolPolicy.Allows(tool, _request.Tools, _readPaths);
-                var allow = approved ? (args?["options"] as JsonArray)?.OfType<JsonObject>()
-                    .FirstOrDefault(option => option["kind"]?.GetValue<string>() == "allow_once")?["optionId"] : null;
-                await _connection!.RespondAsync(id, new()
-                {
-                    ["outcome"] = allow is null ? new JsonObject { ["outcome"] = "cancelled" }
-                        : new JsonObject { ["outcome"] = "selected", ["optionId"] = allow.DeepClone() }
-                }, _stopping.Token);
-            }
-            else
-                await _connection!.RespondErrorAsync(id, -32601, "The DotCraft relay does not provide this capability.", _stopping.Token);
-            return;
-        }
+            Outcome = allow is { } optionId
+                ? RequestPermissionOutcome.FromSelected(optionId)
+                : RequestPermissionOutcome.FromCancelled()
+        });
+    }
 
-        if (method != "session/update" || args?["sessionId"]?.GetValue<string>() != _session?.Id
-            || args?["update"] is not JsonObject update) return;
+    ValueTask IAcpClientHandler.SessionUpdateAsync(SessionNotification parameters, CancellationToken ct)
+    {
+        if (parameters.SessionId.Value != _session?.Id)
+            return ValueTask.CompletedTask;
         lock (_state)
         {
-            if (_turn is not { } turn) return;
-            var type = update["sessionUpdate"]?.GetValue<string>();
-            if (type is "user_message_chunk" or "agent_message_chunk" or "agent_thought_chunk" or "tool_call")
+            if (_turn is not { } turn) return ValueTask.CompletedTask;
+            var update = parameters.Update;
+            if (update is SessionUpdate.UserMessageChunk or SessionUpdate.AgentMessageChunk
+                or SessionUpdate.AgentThoughtChunk or SessionUpdate.ToolCall)
                 turn.Accepted = true;
-            if (turn.Stopping) return;
+            if (turn.Stopping) return ValueTask.CompletedTask;
 
-            if (type == "usage_update")
+            switch (update)
             {
-                if (update["used"] is JsonValue value && value.TryGetValue<long>(out var occupied) && occupied > 0)
-                {
-                    var usage = new UsageContent(new UsageDetails());
-                    ProviderContextUsage.Attach(usage, new(occupied));
-                    _output.Writer.TryWrite(Update([usage]));
-                }
-                return;
-            }
+                case SessionUpdate.UsageUpdate usageUpdate:
+                    if (usageUpdate.Value.Used is > 0 and <= long.MaxValue)
+                    {
+                        var usage = new UsageContent(new UsageDetails());
+                        ProviderContextUsage.Attach(usage, new((long)usageUpdate.Value.Used));
+                        _output.Writer.TryWrite(Update([usage]));
+                    }
+                    return ValueTask.CompletedTask;
 
-            if (type is "tool_call" or "tool_call_update")
-            {
-                if (update["name"] is not null)
-                {
-                    if (!AntigravityAcpToolPolicy.Allows(update, _request.Tools, _readPaths))
-                        throw new NativeToolBlockedException($"Antigravity.NativeToolBlocked: The CLI attempted an unauthorized tool ({update["name"]}).");
+                case SessionUpdate.ToolCall toolCall when toolCall.Value.Name.GetValueOrDefault() is { } callName:
+                    HandleNamedToolLocked(callName, AntigravityAcpToolPolicy.Allows(toolCall.Value, _request.Tools, _readPaths));
+                    return ValueTask.CompletedTask;
+
+                case SessionUpdate.ToolCallUpdate toolCallUpdate when toolCallUpdate.Value.Name.GetValueOrDefault() is { } updateName:
+                    HandleNamedToolLocked(updateName, AntigravityAcpToolPolicy.Allows(toolCallUpdate.Value, _request.Tools, _readPaths));
+                    return ValueTask.CompletedTask;
+
+                case SessionUpdate.AgentMessageChunk { Value.Content: ContentBlock.Text { Value.Text: { Length: > 0 } text } }:
                     StopWatchdogLocked();
-                }
-                return;
-            }
-            if (type is "agent_message_chunk" or "agent_thought_chunk"
-                && update["content"]?["text"]?.GetValue<string>() is { Length: > 0 } text)
-            {
-                StopWatchdogLocked();
-                AIContent content = type == "agent_message_chunk" ? new TextContent(text) : new TextReasoningContent(text);
-                if (content is TextContent)
-                {
+                    var message = new TextContent(text);
                     turn.SawText = true;
-                    _turnContents.Add(content);
-                }
-                _output.Writer.TryWrite(Update([content]));
+                    _turnContents.Add(message);
+                    _output.Writer.TryWrite(Update([message]));
+                    return ValueTask.CompletedTask;
+
+                case SessionUpdate.AgentThoughtChunk { Value.Content: ContentBlock.Text { Value.Text: { Length: > 0 } thought } }:
+                    StopWatchdogLocked();
+                    _output.Writer.TryWrite(Update([new TextReasoningContent(thought)]));
+                    return ValueTask.CompletedTask;
             }
         }
+        return ValueTask.CompletedTask;
+    }
+
+    private void HandleNamedToolLocked(string name, bool allowed)
+    {
+        if (!allowed)
+            FailLocked(new NativeToolBlockedException(
+                $"Antigravity.NativeToolBlocked: The CLI attempted an unauthorized tool ({name})."));
+        else
+            StopWatchdogLocked();
+    }
+
+    private void OnNotificationError(Exception error)
+    {
+        lock (_state)
+            if (_turn is { Stopping: false })
+                FailLocked(Classify(error));
     }
 
     private void OnToolCall(FunctionCallContent call)
@@ -572,8 +599,8 @@ internal sealed class AntigravityRun : IAsyncDisposable
             catch (Exception ex) when (ex is IOException or OperationCanceledException or InvalidOperationException) { }
         }
 
-        if (_connection is not null) await _connection.DisposeAsync();
-        else if (_process is not null) await _process.DisposeAsync();
+        if (_process is not null) await _process.DisposeAsync();
+        if (_client is not null) await _client.DisposeAsync();
         await _stopping.CancelAsync();
         if (_mcp is not null) await _mcp.DisposeAsync();
         var directory = Interlocked.Exchange(ref _directory, null);
@@ -585,7 +612,7 @@ internal sealed class AntigravityRun : IAsyncDisposable
     {
         public AntigravityRequest Submitted { get; } = submitted;
         public AntigravityAcpUsage Usage { get; } = usage;
-        public Task<JsonObject>? Reply { get; set; }
+        public Task<PromptResponse>? Reply { get; set; }
         public bool Accepted { get; set; }
         public bool SawText { get; set; }
         public bool SawTools { get; set; }

@@ -7,6 +7,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="DotCraft.Harness" Version="0.14.5" PrivateAssets="all" ExcludeAssets="runtime" />
+    <PackageReference Include="DotHarness.Acp" Version="0.2.0" GeneratePathProperty="true" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.11" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.4.0" GeneratePathProperty="true" />
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
@@ -20,6 +21,7 @@
     </ItemGroup>
     <RemoveDir Directories="$(TargetDir)plugin" />
     <Copy SourceFiles="$(TargetPath);$(TargetDir)$(TargetName).deps.json" DestinationFolder="$(TargetDir)plugin/lib" />
+    <Copy SourceFiles="$(PkgDotHarness_Acp)/lib/net10.0/DotHarness.Acp.dll" DestinationFolder="$(TargetDir)plugin/lib" />
     <Copy SourceFiles="$(PkgModelContextProtocol_AspNetCore)/lib/net10.0/ModelContextProtocol.AspNetCore.dll" DestinationFolder="$(TargetDir)plugin/lib" />
     <Copy SourceFiles="$(MSBuildProjectDirectory)/.craft-plugin/plugin.json" DestinationFolder="$(TargetDir)plugin/.craft-plugin" />
     <Copy SourceFiles="$(MSBuildProjectDirectory)/settings.schema.json" DestinationFolder="$(TargetDir)plugin" />

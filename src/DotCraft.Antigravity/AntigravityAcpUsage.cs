@@ -1,6 +1,7 @@
-using System.Text.Json.Nodes;
+using System.Text.Json;
 using DotCraft.Agents;
 using DotCraft.Tracing;
+using DotHarness.Acp.V1;
 using Microsoft.Extensions.AI;
 using static DotCraft.Antigravity.AntigravityRequestTiming;
 
@@ -21,14 +22,16 @@ internal sealed class AntigravityAcpUsage(string isolatedGeminiDir, string sessi
         return ToContent(batch.Usage, batch.Timing);
     }
 
-    public UsageContent? ReadResult(JsonObject promptResult)
+    public UsageContent? ReadResult(PromptResponse promptResult)
     {
         var batch = ReadPending();
         _cursor = batch?.Cursor ?? ReadCursor(isolatedGeminiDir, sessionId);
 
         var reported = _reported;
         _reported = default;
-        if (promptResult["usage"] is not JsonObject usage)
+        if (promptResult.ExtensionData is null
+            || !promptResult.ExtensionData.TryGetValue("usage", out var usage)
+            || usage.ValueKind != JsonValueKind.Object)
             return null;
 
         var input = ReadCount(usage, "inputTokens");
@@ -68,6 +71,11 @@ internal sealed class AntigravityAcpUsage(string isolatedGeminiDir, string sessi
         return content;
     }
 
-    private static long ReadCount(JsonObject usage, string name) =>
-        usage[name] is JsonValue value && value.TryGetValue<long>(out var count) && count >= 0 ? count : 0;
+    private static long ReadCount(JsonElement usage, string name) =>
+        usage.TryGetProperty(name, out var value)
+        && value.ValueKind == JsonValueKind.Number
+        && value.TryGetInt64(out var count)
+        && count >= 0
+            ? count
+            : 0;
 }
