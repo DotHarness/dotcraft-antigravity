@@ -12,8 +12,9 @@ var root = Environment.GetEnvironmentVariable("ANTIGRAVITY_CONFIG_DIR") is { Len
 Directory.CreateDirectory(root);
 
 var pid = Environment.ProcessId;
+var startTicks = System.Diagnostics.Process.GetCurrentProcess().StartTime.ToUniversalTime().Ticks;
 var accountPath = Path.Combine(root, "fake-account.json");
-await File.WriteAllTextAsync(Path.Combine(root, $"started-{pid}.json"), JsonSerializer.Serialize(new { pid, args }));
+await File.WriteAllTextAsync(Path.Combine(root, $"started-{pid}.json"), JsonSerializer.Serialize(new { pid, startTicks, args }));
 
 bool IsAuthenticated()
 {

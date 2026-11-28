@@ -361,6 +361,21 @@ internal sealed class AntigravityRun : IAsyncDisposable, IAcpClientHandler
                 StopTimersLocked();
                 WriteUsageLocked(turn, result);
                 var reason = result.StopReason;
+                if (reason == StopReason.EndTurn && turn.BlockedNativeTool is { } blocked)
+                {
+                    if (!turn.RecoveredNativeTool)
+                    {
+                        turn.RecoveredNativeTool = true;
+                        turn.BlockedNativeTool = null;
+                        SendPromptLocked(turn, AntigravityAcpSession.TextPrompt(
+                            $"The built-in tool '{blocked}' is disabled by the DotCraft relay (this is not a user denial of the task or target). " +
+                            "Continue using only the declared dotcraft MCP tools, or answer directly if no tool is needed."));
+                        StartWatchdogLocked();
+                        return;
+                    }
+
+                    throw new NativeToolBlockedException($"Antigravity.NativeToolBlocked: The CLI attempted an unauthorized tool ({blocked}).");
+                }
                 var finish = reason == StopReason.EndTurn || reason == StopReason.Refusal
                     ? ChatFinishReason.Stop
                     : reason == StopReason.MaxTokens || reason == StopReason.MaxTurnRequests
@@ -396,15 +411,21 @@ internal sealed class AntigravityRun : IAsyncDisposable, IAcpClientHandler
     {
         bool approved;
         lock (_state)
+        {
             approved = _turn is { Stopping: false }
                 && parameters.SessionId.Value == _session?.Id
                 && AntigravityAcpToolPolicy.Allows(parameters.ToolCall, _request.Tools, _readPaths);
-        var allow = approved
-            ? parameters.Options.FirstOrDefault(option => option.Kind == PermissionOptionKind.AllowOnce)?.OptionId
-            : null;
+            if (!approved && _turn is { Stopping: false } turn && parameters.SessionId.Value == _session?.Id)
+                turn.BlockedNativeTool = parameters.ToolCall.Name.GetValueOrDefault()
+                    ?? parameters.ToolCall.Title.GetValueOrDefault()
+                    ?? "unknown";
+        }
+
+        var desired = approved ? PermissionOptionKind.AllowOnce : PermissionOptionKind.RejectOnce;
+        var selected = parameters.Options.FirstOrDefault(option => option.Kind == desired)?.OptionId;
         return ValueTask.FromResult(new RequestPermissionResponse
         {
-            Outcome = allow is { } optionId
+            Outcome = selected is { } optionId
                 ? RequestPermissionOutcome.FromSelected(optionId)
                 : RequestPermissionOutcome.FromCancelled()
         });
@@ -435,15 +456,20 @@ internal sealed class AntigravityRun : IAsyncDisposable, IAcpClientHandler
                     return ValueTask.CompletedTask;
 
                 case SessionUpdate.ToolCall toolCall when toolCall.Value.Name.GetValueOrDefault() is { } callName:
-                    HandleNamedToolLocked(callName, AntigravityAcpToolPolicy.Allows(toolCall.Value, _request.Tools, _readPaths));
+                    HandleNamedToolLocked(turn, callName,
+                        AntigravityAcpToolPolicy.Allows(toolCall.Value, _request.Tools, _readPaths),
+                        toolCall.Value.Status.GetValueOrDefault() == ToolCallStatus.Completed);
                     return ValueTask.CompletedTask;
 
                 case SessionUpdate.ToolCallUpdate toolCallUpdate when toolCallUpdate.Value.Name.GetValueOrDefault() is { } updateName:
-                    HandleNamedToolLocked(updateName, AntigravityAcpToolPolicy.Allows(toolCallUpdate.Value, _request.Tools, _readPaths));
+                    HandleNamedToolLocked(turn, updateName,
+                        AntigravityAcpToolPolicy.Allows(toolCallUpdate.Value, _request.Tools, _readPaths),
+                        toolCallUpdate.Value.Status.GetValueOrDefault() == ToolCallStatus.Completed);
                     return ValueTask.CompletedTask;
 
                 case SessionUpdate.AgentMessageChunk { Value.Content: ContentBlock.Text { Value.Text: { Length: > 0 } text } }:
                     StopWatchdogLocked();
+                    turn.BlockedNativeTool = null;
                     var message = new TextContent(text);
                     turn.SawText = true;
                     _turnContents.Add(message);
@@ -459,13 +485,19 @@ internal sealed class AntigravityRun : IAsyncDisposable, IAcpClientHandler
         return ValueTask.CompletedTask;
     }
 
-    private void HandleNamedToolLocked(string name, bool allowed)
+    private void HandleNamedToolLocked(PromptTurn turn, string name, bool allowed, bool completed)
     {
-        if (!allowed)
+        if (allowed)
+        {
+            StopWatchdogLocked();
+            return;
+        }
+
+        if (completed)
             FailLocked(new NativeToolBlockedException(
                 $"Antigravity.NativeToolBlocked: The CLI attempted an unauthorized tool ({name})."));
         else
-            StopWatchdogLocked();
+            turn.BlockedNativeTool = name;
     }
 
     private void OnNotificationError(Exception error)
@@ -482,6 +514,7 @@ internal sealed class AntigravityRun : IAsyncDisposable, IAcpClientHandler
             if (_turn is not { Stopping: false } turn || _stopping.IsCancellationRequested) return;
             turn.Accepted = true;
             turn.SawTools = true;
+            turn.BlockedNativeTool = null;
             StopWatchdogLocked();
             _stagedCalls.Add(call);
             _toolTimer?.Dispose();
@@ -613,6 +646,8 @@ internal sealed class AntigravityRun : IAsyncDisposable, IAcpClientHandler
         public AntigravityRequest Submitted { get; } = submitted;
         public AntigravityAcpUsage Usage { get; } = usage;
         public Task<PromptResponse>? Reply { get; set; }
+        public string? BlockedNativeTool { get; set; }
+        public bool RecoveredNativeTool { get; set; }
         public bool Accepted { get; set; }
         public bool SawText { get; set; }
         public bool SawTools { get; set; }

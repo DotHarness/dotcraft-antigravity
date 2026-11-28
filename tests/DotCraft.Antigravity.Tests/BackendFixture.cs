@@ -63,14 +63,19 @@ internal sealed class BackendFixture : IAsyncDisposable
     public JsonElement Capture => Assert.Single(Files("capture-*.json"));
     public int[] ChatPids => Files("capture-*.json").Select(c => c.GetProperty("pid").GetInt32()).ToArray();
 
-    public static bool IsAlive(int pid)
+    public static bool IsAlive(int pid, long? startTicks = null)
     {
         try
         {
             using var process = Process.GetProcessById(pid);
-            return !process.HasExited;
+            if (process.HasExited)
+                return false;
+            if (startTicks is { } recorded
+                && Math.Abs(process.StartTime.ToUniversalTime().Ticks - recorded) > TimeSpan.FromSeconds(2).Ticks)
+                return false;
+            return true;
         }
-        catch (ArgumentException)
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
         {
             return false;
         }

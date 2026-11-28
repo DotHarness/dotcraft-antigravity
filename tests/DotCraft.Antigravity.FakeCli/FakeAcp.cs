@@ -26,6 +26,9 @@ internal sealed class FakeAcp(string[] args, string root, string cwd)
     private McpClient? _mcp;
     private IList<McpClientTool> _tools = [];
 
+    private string? _blockedRepeatTool;
+    private bool _recoverNext;
+
     private string GeminiDir => Path.Combine(_home, ".gemini", "antigravity-cli");
 
     public async Task<int> RunAsync()
@@ -245,20 +248,66 @@ internal sealed class FakeAcp(string[] args, string root, string cwd)
                 Fail(prompt, "403 VALIDATION_REQUIRED https://accounts.google.com/verify?session=xyz");
                 return;
             }
-            if (text.Contains("native-tool", StringComparison.Ordinal) || text.Contains("foreign-mcp", StringComparison.Ordinal))
+            if (text.Contains("native-tool", StringComparison.Ordinal)
+                || text.Contains("foreign-mcp", StringComparison.Ordinal)
+                || (_blockedRepeatTool is not null && text.Contains("disabled by the DotCraft relay", StringComparison.Ordinal)))
             {
+                if (_recoverNext && text.Contains("disabled by the DotCraft relay", StringComparison.Ordinal))
+                {
+                    _recoverNext = false;
+                    _blockedRepeatTool = null;
+                    var result = await ToolAsync(0, "recovered", prompt.Stop.Token);
+                    var content = result.Content.OfType<TextContentBlock>().First().Text;
+                    Text($"recovered:{content}");
+                    Finish(prompt, "end_turn", Usage(30, 10, 20));
+                    return;
+                }
+
+                bool completedBypass = text.Contains("native-tool-completed", StringComparison.Ordinal);
+                bool recover = text.Contains("native-tool-recover", StringComparison.Ordinal);
                 bool foreign = text.Contains("foreign-mcp", StringComparison.Ordinal);
-                var toolCallId = "undeclared";
+                var toolCallId = $"undeclared-{prompt.Number}";
                 var wrapped = text.Contains("foreign-mcp-wrapped", StringComparison.Ordinal);
-                var name = wrapped ? "call_mcp_tool" : foreign ? "mcp_other_secret" : "run_command";
+                var name = _blockedRepeatTool ?? (recover ? "read_file" : wrapped ? "call_mcp_tool" : foreign ? "mcp_other_secret" : "run_command");
                 var title = $"Run {name}";
-                object rawInput = foreign ? new { ServerName = "other", ToolName = "secret" } : new { CommandLine = "fixture-command" };
-                var kind = foreign ? "other" : "execute";
-                Update(new { sessionUpdate = "tool_call", toolCallId, title, name, args = rawInput, status = "pending", kind, rawInput });
-                Emit(new { jsonrpc = "2.0", id = "permission-1", method = "session/request_permission",
-                    @params = new { sessionId = _conversation, toolCall = new { toolCallId, title, status = "pending", kind, rawInput },
-                        options = new[] { new { optionId = "once", name = "Allow once", kind = "allow_once" } } } });
-                await Task.Delay(Timeout.InfiniteTimeSpan, prompt.Stop.Token);
+                object rawInput = name == "read_file"
+                    ? new { Path = Path.Combine(root, "unauthorized.txt") }
+                    : foreign
+                        ? new { ServerName = "other", ToolName = "secret" }
+                        : new { CommandLine = "fixture-command" };
+                var kind = name == "read_file" ? "read" : foreign ? "other" : "execute";
+                if (completedBypass)
+                {
+                    Update(new { sessionUpdate = "tool_call", toolCallId, title, name, args = rawInput, status = "completed", kind, rawInput });
+                    await Task.Delay(Timeout.InfiniteTimeSpan, prompt.Stop.Token);
+                    return;
+                }
+
+                _blockedRepeatTool = name;
+                _recoverNext = recover;
+                Update(new { sessionUpdate = "tool_call", toolCallId, title, name, args = rawInput, status = "in_progress", kind, rawInput });
+                Update(new { sessionUpdate = "tool_call_update", toolCallId, name, status = "pending" });
+                var permissionId = $"permission-denied-{prompt.Number}";
+                var permission = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _permissions[permissionId] = permission;
+                Emit(new { jsonrpc = "2.0", id = permissionId, method = "session/request_permission",
+                    @params = new
+                    {
+                        sessionId = _conversation,
+                        toolCall = new { toolCallId, title, name, status = "pending", kind, rawInput },
+                        options = new[]
+                        {
+                            new { optionId = "once", name = "Allow once", kind = "allow_once" },
+                            new { optionId = "deny", name = "Reject once", kind = "reject_once" }
+                        }
+                    } });
+                try
+                {
+                    await permission.Task.WaitAsync(prompt.Stop.Token);
+                }
+                finally { _permissions.TryRemove(permissionId, out _); }
+                Update(new { sessionUpdate = "tool_call_update", toolCallId, name, status = "failed" });
+                Finish(prompt, "end_turn", Usage(40, 5, 0));
                 return;
             }
             if (text == "hang")

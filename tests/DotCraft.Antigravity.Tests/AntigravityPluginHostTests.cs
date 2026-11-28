@@ -104,8 +104,10 @@ public sealed class AntigravityPluginHostTests
             Assert.True(File.Exists(Path.Combine(saved, AntigravitySessions.CheckpointFile)));
             foreach (var file in Directory.GetFiles(dataRoot, "started-*.json"))
             {
-                var pid = JsonSerializer.Deserialize<JsonElement>(File.ReadAllText(file)).GetProperty("pid").GetInt32();
-                Assert.False(BackendFixture.IsAlive(pid));
+                var started = JsonSerializer.Deserialize<JsonElement>(File.ReadAllText(file));
+                var pid = started.GetProperty("pid").GetInt32();
+                var startTicks = started.GetProperty("startTicks").GetInt64();
+                Assert.False(BackendFixture.IsAlive(pid, startTicks));
             }
         }
         finally

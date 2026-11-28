@@ -268,12 +268,36 @@ public sealed class BackendSamplingTests
     }
 
     [Fact]
-    public async Task UnauthorizedNativeToolStepFailsClosedAndKillsWorker()
+    public async Task RejectedUnauthorizedNativeToolRecoversOnSameSessionWithDotCraftTools()
+    {
+        await using var fixture = new BackendFixture();
+        using var scope = BackendFixture.Conversation();
+        var options = Options();
+        var history = new List<ChatMessage> { new(ChatRole.User, "native-tool-recover") };
+
+        var first = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.Equal(ChatFinishReason.ToolCalls, first.FinishReason);
+        var call = Assert.Single(first.Messages.SelectMany(m => m.Contents).OfType<FunctionCallContent>());
+        var pid = Assert.Single(fixture.ChatPids);
+
+        history.AddRange(first.Messages);
+        history.Add(new(ChatRole.Tool, [new FunctionResultContent(call.CallId, "ok-from-mcp")]));
+
+        var final = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.Equal(ChatFinishReason.Stop, final.FinishReason);
+        Assert.Equal("recovered:ok-from-mcp", final.Text);
+        Assert.Equal(pid, Assert.Single(fixture.ChatPids));
+    }
+
+    [Theory]
+    [InlineData("native-tool")]
+    [InlineData("native-tool-completed")]
+    public async Task UnauthorizedNativeToolStepFailsClosedAndKillsWorker(string prompt)
     {
         await using var fixture = new BackendFixture();
 
         var ex = await Assert.ThrowsAsync<NativeToolBlockedException>(() =>
-            fixture.Client.GetResponseAsync([new(ChatRole.User, "native-tool")]).WaitAsync(TimeSpan.FromSeconds(15)));
+            fixture.Client.GetResponseAsync([new(ChatRole.User, prompt)]).WaitAsync(TimeSpan.FromSeconds(15)));
 
         Assert.Contains("Antigravity.NativeToolBlocked", ex.Message);
         Assert.False(BackendFixture.IsAlive(Assert.Single(fixture.ChatPids)));
