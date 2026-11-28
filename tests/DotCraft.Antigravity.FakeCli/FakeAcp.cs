@@ -257,7 +257,7 @@ internal sealed class FakeAcp(string[] args, string root, string cwd)
                 {
                     _recoverNext = false;
                     _blockedRepeatTool = null;
-                    var result = await ToolAsync(0, "recovered", prompt.Stop.Token);
+                    var result = await ToolAsync(0, text, prompt.Stop.Token);
                     var content = result.Content.OfType<TextContentBlock>().First().Text;
                     Text($"recovered:{content}");
                     Finish(prompt, "end_turn", Usage(30, 10, 20));
@@ -266,6 +266,7 @@ internal sealed class FakeAcp(string[] args, string root, string cwd)
 
                 bool completedBypass = text.Contains("native-tool-completed", StringComparison.Ordinal);
                 bool recover = text.Contains("native-tool-recover", StringComparison.Ordinal);
+                bool recoverParallel = text.Contains("native-tool-recover-parallel", StringComparison.Ordinal);
                 bool foreign = text.Contains("foreign-mcp", StringComparison.Ordinal);
                 var toolCallId = $"undeclared-{prompt.Number}";
                 var wrapped = text.Contains("foreign-mcp-wrapped", StringComparison.Ordinal);
@@ -286,6 +287,13 @@ internal sealed class FakeAcp(string[] args, string root, string cwd)
 
                 _blockedRepeatTool = name;
                 _recoverNext = recover;
+                if (recoverParallel)
+                {
+                    var cmdId = $"undeclared-cmd-{prompt.Number}";
+                    var cmdInput = new { CommandLine = "fixture-command" };
+                    Update(new { sessionUpdate = "tool_call", toolCallId = cmdId, title = "Run run_command", name = "run_command", args = cmdInput, status = "in_progress", kind = "execute", rawInput = cmdInput });
+                    Update(new { sessionUpdate = "tool_call_update", toolCallId = cmdId, name = "run_command", status = "failed" });
+                }
                 Update(new { sessionUpdate = "tool_call", toolCallId, title, name, args = rawInput, status = "in_progress", kind, rawInput });
                 Update(new { sessionUpdate = "tool_call_update", toolCallId, name, status = "pending" });
                 var permissionId = $"permission-denied-{prompt.Number}";

@@ -266,17 +266,20 @@ public sealed class BackendSamplingTests
         Assert.Contains(allowRules, rule => rule.StartsWith("read_file(", StringComparison.Ordinal) && rule.EndsWith(".png)", StringComparison.Ordinal));
     }
 
-    [Fact]
-    public async Task RejectedUnauthorizedNativeToolRecoversOnSameSessionWithDotCraftTools()
+    [Theory]
+    [InlineData("native-tool-recover", "The built-in tool 'read_file' is disabled")]
+    [InlineData("native-tool-recover-parallel", "The built-in tools 'run_command', 'read_file' are disabled")]
+    public async Task RejectedUnauthorizedNativeToolRecoversOnSameSessionWithDotCraftTools(string prompt, string expectedRecoveryPrefix)
     {
         await using var fixture = new BackendFixture();
         using var scope = BackendFixture.Conversation();
         var options = Options();
-        var history = new List<ChatMessage> { new(ChatRole.User, "native-tool-recover") };
+        var history = new List<ChatMessage> { new(ChatRole.User, prompt) };
 
         var first = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
         Assert.Equal(ChatFinishReason.ToolCalls, first.FinishReason);
         var call = Assert.Single(first.Messages.SelectMany(m => m.Contents).OfType<FunctionCallContent>());
+        Assert.StartsWith(expectedRecoveryPrefix, call.Arguments?["value"]?.ToString());
         var pid = Assert.Single(fixture.ChatPids);
 
         history.AddRange(first.Messages);

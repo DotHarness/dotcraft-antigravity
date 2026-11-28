@@ -363,20 +363,25 @@ internal sealed class AntigravityRun : IAsyncDisposable, IAcpClientHandler
                 StopTimersLocked();
                 WriteUsageLocked(turn, result);
                 var reason = result.StopReason;
-                if (reason == StopReason.EndTurn && turn.BlockedNativeTool is { } blocked)
+                if (reason == StopReason.EndTurn && turn.BlockedNativeTools.Count > 0)
                 {
+                    var blocked = turn.BlockedNativeTools.ToArray();
                     if (!turn.RecoveredNativeTool)
                     {
                         turn.RecoveredNativeTool = true;
-                        turn.BlockedNativeTool = null;
+                        turn.BlockedNativeTools.Clear();
+                        var summary = blocked.Length == 1
+                            ? $"The built-in tool '{blocked[0]}' is disabled"
+                            : $"The built-in tools {string.Join(", ", blocked.Select(name => $"'{name}'"))} are disabled";
                         SendPromptLocked(turn, AntigravityAcpSession.TextPrompt(
-                            $"The built-in tool '{blocked}' is disabled by the DotCraft relay (this is not a user denial of the task or target). " +
+                            $"{summary} by the DotCraft relay (this is not a user denial of the task or target). " +
                             "Continue using only the declared dotcraft MCP tools, or answer directly if no tool is needed."));
                         StartWatchdogLocked();
                         return;
                     }
 
-                    throw new NativeToolBlockedException($"Antigravity.NativeToolBlocked: The CLI attempted an unauthorized tool ({blocked}).");
+                    throw new NativeToolBlockedException(
+                        $"Antigravity.NativeToolBlocked: The CLI attempted an unauthorized tool ({string.Join(", ", blocked)}).");
                 }
                 var finish = reason == StopReason.EndTurn || reason == StopReason.Refusal
                     ? ChatFinishReason.Stop
@@ -418,9 +423,9 @@ internal sealed class AntigravityRun : IAsyncDisposable, IAcpClientHandler
                 && parameters.SessionId.Value == _session?.Id
                 && AntigravityAcpToolPolicy.Allows(parameters.ToolCall, _request.Tools, _readPaths);
             if (!approved && _turn is { Stopping: false } turn && parameters.SessionId.Value == _session?.Id)
-                turn.BlockedNativeTool = parameters.ToolCall.Name.GetValueOrDefault()
+                turn.RecordBlockedNativeTool(parameters.ToolCall.Name.GetValueOrDefault()
                     ?? parameters.ToolCall.Title.GetValueOrDefault()
-                    ?? "unknown";
+                    ?? "unknown");
         }
 
         var desired = approved ? PermissionOptionKind.AllowOnce : PermissionOptionKind.RejectOnce;
@@ -471,7 +476,7 @@ internal sealed class AntigravityRun : IAsyncDisposable, IAcpClientHandler
 
                 case SessionUpdate.AgentMessageChunk { Value.Content: ContentBlock.Text { Value.Text: { Length: > 0 } text } }:
                     StopWatchdogLocked();
-                    turn.BlockedNativeTool = null;
+                    turn.BlockedNativeTools.Clear();
                     var message = new TextContent(text);
                     turn.SawText = true;
                     _turnContents.Add(message);
@@ -499,7 +504,7 @@ internal sealed class AntigravityRun : IAsyncDisposable, IAcpClientHandler
             FailLocked(new NativeToolBlockedException(
                 $"Antigravity.NativeToolBlocked: The CLI attempted an unauthorized tool ({name})."));
         else
-            turn.BlockedNativeTool = name;
+            turn.RecordBlockedNativeTool(name);
     }
 
     private void OnNotificationError(Exception error)
@@ -516,7 +521,7 @@ internal sealed class AntigravityRun : IAsyncDisposable, IAcpClientHandler
             if (_turn is not { Stopping: false } turn || _stopping.IsCancellationRequested) return;
             turn.Accepted = true;
             turn.SawTools = true;
-            turn.BlockedNativeTool = null;
+            turn.BlockedNativeTools.Clear();
             StopWatchdogLocked();
             _stagedCalls.Add(call);
             _toolTimer?.Dispose();
@@ -648,12 +653,18 @@ internal sealed class AntigravityRun : IAsyncDisposable, IAcpClientHandler
         public AntigravityRequest Submitted { get; } = submitted;
         public AntigravityAcpUsage Usage { get; } = usage;
         public Task<PromptResponse>? Reply { get; set; }
-        public string? BlockedNativeTool { get; set; }
+        public List<string> BlockedNativeTools { get; } = [];
         public bool RecoveredNativeTool { get; set; }
         public bool Accepted { get; set; }
         public bool SawText { get; set; }
         public bool SawTools { get; set; }
         public bool Stopping { get; set; }
+
+        public void RecordBlockedNativeTool(string name)
+        {
+            if (!BlockedNativeTools.Contains(name, StringComparer.Ordinal))
+                BlockedNativeTools.Add(name);
+        }
     }
 
     internal enum ResumeOutcome { Incompatible, Resumed, NeedsConversationRespawn }
