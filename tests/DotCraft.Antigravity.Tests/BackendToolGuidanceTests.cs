@@ -74,6 +74,47 @@ public sealed class BackendToolGuidanceTests
         Assert.Empty(fixture.Files("cancel-*.json"));
     }
 
+    [Fact]
+    public async Task QueuedSteerWithImageUsesNativePromptOnSameSession()
+    {
+        await using var fixture = new BackendFixture();
+        using var scope = BackendFixture.Conversation();
+        var options = BackendSamplingTests.Options();
+        var history = new List<ChatMessage> { new(ChatRole.User, "parallel two-rounds") };
+        var first = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
+        var id = Assert.IsType<string>(first.ResponseId);
+        var pid = Assert.Single(fixture.ChatPids);
+        var firstCalls = first.Messages.SelectMany(message => message.Contents).OfType<FunctionCallContent>().ToArray();
+
+        history.AddRange(first.Messages);
+        history.Add(new(ChatRole.Tool,
+        [
+            new FunctionResultContent(firstCalls.Single(call => call.Name == "Echo.One").CallId, "A"),
+            new FunctionResultContent(firstCalls.Single(call => call.Name == "Echo-Two").CallId, "B")
+        ]));
+        var imageBytes = new byte[] { 9, 8, 7, 6 };
+        history.Add(new(ChatRole.User,
+        [
+            new TextContent("Check this screenshot"),
+            new DataContent(imageBytes, "image/png")
+        ]));
+
+        var second = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
+
+        Assert.Equal(id, second.ResponseId);
+        Assert.Equal(pid, Assert.Single(fixture.ChatPids));
+        Assert.Equal(ChatFinishReason.ToolCalls, second.FinishReason);
+
+        var steer = Assert.Single(fixture.Files("steer-*.json"));
+        var blocks = steer.GetProperty("blocks").EnumerateArray().ToArray();
+        Assert.Equal(2, blocks.Length);
+        Assert.Equal("text", blocks[0].GetProperty("type").GetString());
+        Assert.Equal("Check this screenshot", blocks[0].GetProperty("text").GetString());
+        Assert.Equal("image", blocks[1].GetProperty("type").GetString());
+        Assert.Equal("image/png", blocks[1].GetProperty("mimeType").GetString());
+        Assert.Equal(imageBytes, Convert.FromBase64String(blocks[1].GetProperty("data").GetString()!));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -96,7 +137,7 @@ public sealed class BackendToolGuidanceTests
         ]));
         history.Add(wrongCallId
             ? new(ChatRole.User, "queued input")
-            : new(ChatRole.User, [new DataContent(new byte[] { 1, 2 }, "image/png")]));
+            : new(ChatRole.User, [new DataContent(new byte[] { 1, 2 }, "audio/wav")]));
 
         var resumed = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
 
@@ -106,7 +147,7 @@ public sealed class BackendToolGuidanceTests
         var capture = Assert.Single(fixture.Files("capture-*.json"), capture => capture.GetProperty("pid").GetInt32() != pid);
         var payload = capture.GetProperty("input").GetProperty("message").GetProperty("content").GetString();
         Assert.Contains("Conversation history", payload);
-        Assert.Contains(wrongCallId ? "queued input" : "[Image](", payload);
+        Assert.Contains(wrongCallId ? "queued input" : "[Audio](", payload);
     }
 
     private static string[] TextBlocks(JsonElement result) =>

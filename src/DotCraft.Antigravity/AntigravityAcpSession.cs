@@ -12,6 +12,7 @@ internal sealed class AntigravityAcpSession(AcpV1Client client)
 
     public string Id { get; private set; } = "";
     public bool IsOpen => Id.Length > 0 && !client.Connection.Completion.IsCompleted;
+    public bool SupportsImagePrompt { get; private set; }
 
     public async Task OpenAsync(string workingDirectory, McpServer[] servers, string? resumeId, CancellationToken ct)
     {
@@ -22,6 +23,7 @@ internal sealed class AntigravityAcpSession(AcpV1Client client)
             ClientInfo = new Implementation { Name = "dotcraft", Version = ClientVersion }
         }, ct);
         var capabilities = init.AgentCapabilities.GetValueOrDefault();
+        SupportsImagePrompt = capabilities?.PromptCapabilities.GetValueOrDefault()?.Image.GetValueOrDefault() == true;
         if (servers.Length > 0 && capabilities?.McpCapabilities.GetValueOrDefault()?.Http.GetValueOrDefault() != true)
             throw new InvalidDataException("Antigravity.AcpCapabilities: The CLI does not support the required ACP capabilities.");
 

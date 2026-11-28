@@ -28,6 +28,7 @@ internal sealed class FakeAcp(string[] args, string root, string cwd)
 
     private string? _blockedRepeatTool;
     private bool _recoverNext;
+    private bool _recoverAgainAfterTool;
 
     private string GeminiDir => Path.Combine(_home, ".gemini", "antigravity-cli");
 
@@ -47,8 +48,13 @@ internal sealed class FakeAcp(string[] args, string root, string cwd)
                         {
                             protocolVersion = 1,
                             agentInfo = new { name = "antigravity", version = "1.5.18" },
-                            agentCapabilities = new { mcpCapabilities = new { http = true },
-                                loadSession = true, sessionCapabilities = new { resume = new { }, close = new { } } }
+                            agentCapabilities = new
+                            {
+                                mcpCapabilities = new { http = true },
+                                promptCapabilities = new { image = true, audio = false },
+                                loadSession = true,
+                                sessionCapabilities = new { resume = new { }, close = new { } }
+                            }
                         });
                         break;
                     case "session/new":
@@ -259,6 +265,19 @@ internal sealed class FakeAcp(string[] args, string root, string cwd)
                     _blockedRepeatTool = null;
                     var result = await ToolAsync(0, text, prompt.Stop.Token);
                     var content = result.Content.OfType<TextContentBlock>().First().Text;
+                    if (_recoverAgainAfterTool)
+                    {
+                        _recoverAgainAfterTool = false;
+                        _recoverNext = true;
+                        _blockedRepeatTool = "run_command";
+                        var nextId = $"undeclared-after-{prompt.Number}";
+                        var nextInput = new { CommandLine = $"after:{content}" };
+                        Update(new { sessionUpdate = "tool_call", toolCallId = nextId, title = "Run run_command", name = "run_command", args = nextInput, status = "in_progress", kind = "execute", rawInput = nextInput });
+                        Update(new { sessionUpdate = "tool_call_update", toolCallId = nextId, name = "run_command", status = "failed" });
+                        Finish(prompt, "end_turn", Usage(35, 5, 20));
+                        return;
+                    }
+
                     Text($"recovered:{content}");
                     Finish(prompt, "end_turn", Usage(30, 10, 20));
                     return;
@@ -267,6 +286,7 @@ internal sealed class FakeAcp(string[] args, string root, string cwd)
                 bool completedBypass = text.Contains("native-tool-completed", StringComparison.Ordinal);
                 bool recover = text.Contains("native-tool-recover", StringComparison.Ordinal);
                 bool recoverParallel = text.Contains("native-tool-recover-parallel", StringComparison.Ordinal);
+                _recoverAgainAfterTool = text.Contains("native-tool-recover-after-progress", StringComparison.Ordinal);
                 bool foreign = text.Contains("foreign-mcp", StringComparison.Ordinal);
                 var toolCallId = $"undeclared-{prompt.Number}";
                 var wrapped = text.Contains("foreign-mcp-wrapped", StringComparison.Ordinal);

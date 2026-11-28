@@ -27,6 +27,7 @@ internal sealed class AntigravityRun : IAsyncDisposable, IAcpClientHandler
     private string? _handoffPath;
     private string _geminiDir = "";
     private string _home = "";
+    private string _workDir = "";
     private AntigravityMcpServer? _mcp;
     private AntigravityProcess? _process;
     private AcpV1Client? _client;
@@ -89,6 +90,7 @@ internal sealed class AntigravityRun : IAsyncDisposable, IAcpClientHandler
         (_home, _geminiDir) = await AntigravityEnvironment.PrepareIsolatedHomeAsync(
             directory, _settings.AllowAiCredits, _readPaths, ct, _configDirectory);
         var work = directory.EnsureSubdirectory("work");
+        _workDir = work;
         await directory.WriteAsync(Path.Combine("work", AntigravityRequest.RulesFileName),
             _request.BuildRelayRulesMarkdown(_readPaths.Count > 0), ct);
         var staleAgents = Path.Combine(work, ".agents");
@@ -161,7 +163,7 @@ internal sealed class AntigravityRun : IAsyncDisposable, IAcpClientHandler
             if (_identity?.TurnId != identity?.TurnId || added is null
                 || added.Length < callIds.Length
                 || !added.Take(callIds.Length).All(n => n?["role"]?.GetValue<string>() == "tool" && n["content"]?["CallId"] is not null)
-                || !request.TryBuildSteerPrompt(added.AsSpan(callIds.Length), out var guidance)
+                || !request.TryBuildSteerPrompt(added.AsSpan(callIds.Length), _session?.SupportsImagePrompt == true, out var guidance)
                 || _request.ModelSlug != request.ModelSlug || _request.EffortToken != request.EffortToken)
                 return ResumeOutcome.Incompatible;
 
@@ -421,7 +423,7 @@ internal sealed class AntigravityRun : IAsyncDisposable, IAcpClientHandler
         {
             approved = _turn is { Stopping: false }
                 && parameters.SessionId.Value == _session?.Id
-                && AntigravityAcpToolPolicy.Allows(parameters.ToolCall, _request.Tools, _readPaths);
+                && AntigravityAcpToolPolicy.Allows(parameters.ToolCall, _request.Tools, _readPaths, _workDir);
             if (!approved && _turn is { Stopping: false } turn && parameters.SessionId.Value == _session?.Id)
                 turn.RecordBlockedNativeTool(parameters.ToolCall.Name.GetValueOrDefault()
                     ?? parameters.ToolCall.Title.GetValueOrDefault()
@@ -464,13 +466,13 @@ internal sealed class AntigravityRun : IAsyncDisposable, IAcpClientHandler
 
                 case SessionUpdate.ToolCall toolCall when toolCall.Value.Name.GetValueOrDefault() is { } callName:
                     HandleNamedToolLocked(turn, callName,
-                        AntigravityAcpToolPolicy.Allows(toolCall.Value, _request.Tools, _readPaths),
+                        AntigravityAcpToolPolicy.Allows(toolCall.Value, _request.Tools, _readPaths, _workDir),
                         toolCall.Value.Status.GetValueOrDefault() == ToolCallStatus.Completed);
                     return ValueTask.CompletedTask;
 
                 case SessionUpdate.ToolCallUpdate toolCallUpdate when toolCallUpdate.Value.Name.GetValueOrDefault() is { } updateName:
                     HandleNamedToolLocked(turn, updateName,
-                        AntigravityAcpToolPolicy.Allows(toolCallUpdate.Value, _request.Tools, _readPaths),
+                        AntigravityAcpToolPolicy.Allows(toolCallUpdate.Value, _request.Tools, _readPaths, _workDir),
                         toolCallUpdate.Value.Status.GetValueOrDefault() == ToolCallStatus.Completed);
                     return ValueTask.CompletedTask;
 
@@ -522,6 +524,7 @@ internal sealed class AntigravityRun : IAsyncDisposable, IAcpClientHandler
             turn.Accepted = true;
             turn.SawTools = true;
             turn.BlockedNativeTools.Clear();
+            turn.RecoveredNativeTool = false;
             StopWatchdogLocked();
             _stagedCalls.Add(call);
             _toolTimer?.Dispose();

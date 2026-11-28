@@ -221,7 +221,10 @@ internal sealed class AntigravityRequest
         return (string.Join("\n\n", parts), mediaPaths);
     }
 
-    public bool TryBuildSteerPrompt(ReadOnlySpan<JsonNode?> trailing, out DotHarness.Acp.V1.ContentBlock[]? guidance)
+    public bool TryBuildSteerPrompt(
+        ReadOnlySpan<JsonNode?> trailing,
+        bool allowInlineImages,
+        out DotHarness.Acp.V1.ContentBlock[]? guidance)
     {
         guidance = null;
         if (trailing.IsEmpty)
@@ -229,14 +232,33 @@ internal sealed class AntigravityRequest
 
         foreach (var atom in trailing)
         {
-            if (atom?["role"]?.GetValue<string>() != "user" || atom["content"]?["text"] is not JsonValue)
+            if (atom?["role"]?.GetValue<string>() != "user")
                 return false;
         }
 
         var messages = Messages.Reverse().TakeWhile(message => message.Role == ChatRole.User).Reverse();
-        guidance = messages.SelectMany(message => message.Contents.OfType<TextContent>())
-            .Select(content => DotHarness.Acp.V1.ContentBlock.FromText(content.Text))
-            .ToArray();
+        var blocks = new List<DotHarness.Acp.V1.ContentBlock>();
+        foreach (var content in messages.SelectMany(message => message.Contents))
+        {
+            if (content is UsageContent or TextReasoningContent)
+                continue;
+
+            if (content is TextContent text)
+                blocks.Add(DotHarness.Acp.V1.ContentBlock.FromText(text.Text));
+            else if (allowInlineImages
+                && content is DataContent data
+                && data.MediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+                blocks.Add(DotHarness.Acp.V1.ContentBlock.FromImage(
+                    Convert.ToBase64String(data.Data.Span),
+                    AntigravityContent.CleanMediaType(data.MediaType)));
+            else
+                return false;
+        }
+
+        if (blocks.Count == 0)
+            return false;
+
+        guidance = blocks.ToArray();
         return true;
     }
 

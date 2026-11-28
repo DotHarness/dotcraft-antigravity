@@ -7,11 +7,19 @@ internal sealed class NativeToolBlockedException(string message) : InvalidOperat
 
 internal static class AntigravityAcpToolPolicy
 {
-    public static bool Allows(ToolCall tool, AntigravityTools tools, IReadOnlySet<string> allowedPaths) =>
-        Allows(tool.Name.GetValueOrDefault(), tool.Title, tool.RawInput.GetValueOrDefault(), tool.ExtensionData, tools, allowedPaths);
+    public static bool Allows(
+        ToolCall tool,
+        AntigravityTools tools,
+        IReadOnlySet<string> allowedPaths,
+        string? workDirectory) =>
+        Allows(tool.Name.GetValueOrDefault(), tool.Title, tool.RawInput.GetValueOrDefault(), tool.ExtensionData, tools, allowedPaths, workDirectory);
 
-    public static bool Allows(ToolCallUpdate tool, AntigravityTools tools, IReadOnlySet<string> allowedPaths) =>
-        Allows(tool.Name.GetValueOrDefault(), tool.Title.GetValueOrDefault(), tool.RawInput.GetValueOrDefault(), tool.ExtensionData, tools, allowedPaths);
+    public static bool Allows(
+        ToolCallUpdate tool,
+        AntigravityTools tools,
+        IReadOnlySet<string> allowedPaths,
+        string? workDirectory) =>
+        Allows(tool.Name.GetValueOrDefault(), tool.Title.GetValueOrDefault(), tool.RawInput.GetValueOrDefault(), tool.ExtensionData, tools, allowedPaths, workDirectory);
 
     private static bool Allows(
         string? name,
@@ -19,7 +27,8 @@ internal static class AntigravityAcpToolPolicy
         JsonElement rawInput,
         Dictionary<string, JsonElement>? extensionData,
         AntigravityTools tools,
-        IReadOnlySet<string> allowedPaths)
+        IReadOnlySet<string> allowedPaths,
+        string? workDirectory)
     {
         const string prefix = "mcp_dotcraft_";
         if (name is null && title?.StartsWith("Run ", StringComparison.Ordinal) == true)
@@ -42,12 +51,23 @@ internal static class AntigravityAcpToolPolicy
             return server == AntigravityTools.ServerName && target is not null && tools.Contains(target);
         }
         if (name is not ("read_file" or "view_file")) return false;
-        var path = StringProperty(input, "Path", "path");
-        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
+        var path = StringProperty(input, "Path", "path", "AbsolutePath");
+        if (string.IsNullOrWhiteSpace(path))
             return false;
         try
         {
-            return allowedPaths.Contains(Path.GetFullPath(path));
+            var fullPath = Path.IsPathFullyQualified(path)
+                ? Path.GetFullPath(path)
+                : string.IsNullOrWhiteSpace(workDirectory) ? null : Path.GetFullPath(path, workDirectory);
+            if (fullPath is null)
+                return false;
+            if (allowedPaths.Contains(fullPath))
+                return true;
+            if (string.IsNullOrWhiteSpace(workDirectory))
+                return false;
+            var rulesPath = Path.GetFullPath(Path.Combine(workDirectory, AntigravityRequest.RulesFileName));
+            return string.Equals(fullPath, rulesPath,
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
         }
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or IOException)
         {

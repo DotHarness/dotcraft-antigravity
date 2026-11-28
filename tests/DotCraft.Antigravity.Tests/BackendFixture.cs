@@ -71,7 +71,7 @@ internal sealed class BackendFixture : IAsyncDisposable
             if (process.HasExited)
                 return false;
             if (startTicks is { } recorded
-                && Math.Abs(process.StartTime.ToUniversalTime().Ticks - recorded) > TimeSpan.FromSeconds(2).Ticks)
+                && process.StartTime.ToUniversalTime().Ticks != recorded)
                 return false;
             return true;
         }

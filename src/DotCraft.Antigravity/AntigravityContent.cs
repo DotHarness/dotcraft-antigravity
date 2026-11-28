@@ -130,10 +130,12 @@ internal static class AntigravityContent
         _ => new JsonObject { ["type"] = content.GetType().Name, ["text"] = content.ToString() ?? "" }
     };
 
-    private static string ResolveExtension(string mediaType)
+    public static string CleanMediaType(string mediaType)
     {
         var semi = mediaType.IndexOf(';');
-        var clean = semi >= 0 ? mediaType[..semi].Trim() : mediaType.Trim();
-        return MediaExtensions.TryGetValue(clean, out var ext) ? ext : ".bin";
+        return semi >= 0 ? mediaType[..semi].Trim() : mediaType.Trim();
     }
+
+    private static string ResolveExtension(string mediaType) =>
+        MediaExtensions.TryGetValue(CleanMediaType(mediaType), out var ext) ? ext : ".bin";
 }

@@ -291,6 +291,34 @@ public sealed class BackendSamplingTests
         Assert.Equal(pid, Assert.Single(fixture.ChatPids));
     }
 
+    [Fact]
+    public async Task RecoveryAllowanceResetsAfterValidDotCraftToolProgress()
+    {
+        await using var fixture = new BackendFixture();
+        using var scope = BackendFixture.Conversation();
+        var options = Options();
+        var history = new List<ChatMessage> { new(ChatRole.User, "native-tool-recover-after-progress") };
+
+        var first = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
+        var firstCall = Assert.Single(first.Messages.SelectMany(m => m.Contents).OfType<FunctionCallContent>());
+        var pid = Assert.Single(fixture.ChatPids);
+
+        history.AddRange(first.Messages);
+        history.Add(new(ChatRole.Tool, [new FunctionResultContent(firstCall.CallId, "step1")]));
+
+        var second = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
+        var secondCall = Assert.Single(second.Messages.SelectMany(m => m.Contents).OfType<FunctionCallContent>());
+        Assert.StartsWith("The built-in tool 'run_command' is disabled", secondCall.Arguments?["value"]?.ToString());
+
+        history.AddRange(second.Messages);
+        history.Add(new(ChatRole.Tool, [new FunctionResultContent(secondCall.CallId, "step2")]));
+
+        var final = await fixture.Client.GetResponseAsync(history, options).WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.Equal(ChatFinishReason.Stop, final.FinishReason);
+        Assert.Equal("recovered:step2", final.Text);
+        Assert.Equal(pid, Assert.Single(fixture.ChatPids));
+    }
+
     [Theory]
     [InlineData("native-tool")]
     [InlineData("native-tool-completed")]

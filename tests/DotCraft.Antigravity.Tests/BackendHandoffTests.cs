@@ -76,19 +76,25 @@ public sealed class BackendHandoffTests
     [Fact]
     public void FileReadMustTargetExactlyTheAuthorizedHandoff()
     {
-        var path = Path.Combine(Path.GetTempPath(), "handoff.txt");
-        var paths = new HashSet<string> { path };
+        var work = Path.Combine(Path.GetTempPath(), "antigravity-policy-work");
+        var path = Path.Combine(work, "conversation-handoff.txt");
+        var paths = new HashSet<string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal) { path };
         var tools = new AntigravityTools([]);
-        ToolCall ReadStep(string target) => new()
+        ToolCall ReadStep(string name, object rawInput) => new()
         {
             ToolCallId = "read-1",
-            Name = "read_file",
+            Name = name,
             Title = "File " + Path.GetFileName(path),
-            RawInput = JsonSerializer.SerializeToElement(new { Path = target })
+            RawInput = JsonSerializer.SerializeToElement(rawInput)
         };
 
-        Assert.True(AntigravityAcpToolPolicy.Allows(ReadStep(path), tools, paths));
-        Assert.False(AntigravityAcpToolPolicy.Allows(ReadStep(path + ".other"), tools, paths));
+        Assert.True(AntigravityAcpToolPolicy.Allows(ReadStep("read_file", new { Path = path }), tools, paths, work));
+        Assert.True(AntigravityAcpToolPolicy.Allows(ReadStep("read_file", new { Path = "conversation-handoff.txt" }), tools, paths, work));
+        Assert.True(AntigravityAcpToolPolicy.Allows(ReadStep("view_file", new { AbsolutePath = path }), tools, paths, work));
+        Assert.True(AntigravityAcpToolPolicy.Allows(ReadStep("read_file", new { Path = "AGENTS.md" }), tools, paths, work));
+        Assert.True(AntigravityAcpToolPolicy.Allows(ReadStep("read_file", new { Path = Path.Combine(work, "AGENTS.md") }), tools, paths, work));
+        Assert.False(AntigravityAcpToolPolicy.Allows(ReadStep("read_file", new { Path = path + ".other" }), tools, paths, work));
+        Assert.False(AntigravityAcpToolPolicy.Allows(ReadStep("read_file", new { Path = "../escape.txt" }), tools, paths, work));
     }
 
     private static string Input(JsonElement capture) =>
